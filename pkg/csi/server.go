@@ -1,0 +1,129 @@
+package csi
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net"
+	"os"
+	"path/filepath"
+
+	"github.com/container-storage-interface/spec/lib/go/csi"
+	"github.com/timpa0130/nvmeof-csi/pkg/ids"
+	"github.com/timpa0130/nvmeof-csi/pkg/nvmet"
+	"github.com/timpa0130/nvmeof-csi/pkg/zfs"
+	"google.golang.org/grpc"
+)
+
+// Plugin identity.
+const (
+	PluginName    = "com.timpa0130.nvmeof-csi"
+	PluginVersion = "1.0.0"
+	DefaultPort   = "4420"
+)
+
+// Mode selects which CSI services a process serves.
+type Mode string
+
+const (
+	ModeAll        Mode = "all"
+	ModeController Mode = "controller"
+	ModeNode       Mode = "node"
+)
+
+// Config configures the driver.
+type Config struct {
+	SocketPath string
+	TargetAddr string
+	Port       string
+	Pool       string
+	NodeID     string
+	Mode       Mode
+}
+
+// Driver wires the CSI servers to the backing subsystems. It is
+// stateless: everything is derived from the volume ID.
+type Driver struct {
+	cfg    Config
+	target *nvmet.Target
+	zfs    *zfs.ZFS
+}
+
+// NewDriver builds a Driver.
+func NewDriver(cfg Config) (*Driver, error) {
+	if cfg.Mode == "" {
+		cfg.Mode = ModeAll
+	}
+	return &Driver{
+		cfg:    cfg,
+		target: nvmet.New(),
+		zfs:    zfs.New(cfg.Pool),
+	}, nil
+}
+
+// EnsurePort creates the shared TCP target port.
+func (d *Driver) EnsurePort() error {
+	return d.target.EnsurePort(d.cfg.TargetAddr, d.cfg.Port)
+}
+
+// Reconcile tears down configfs subsystems that carry our NQN root but
+// whose backing zvol no longer exists. configfs is in-memory, so this
+// heals stale entries across restarts. Foreign subsystems are left
+// alone.
+func (d *Driver) Reconcile() error {
+	subs, err := d.target.ListSubsystems()
+	if err != nil {
+		return err
+	}
+	for _, nqn := range subs {
+		volumeID, ok := ids.ParseNQN(nqn)
+		if !ok {
+			continue // not ours
+		}
+		ns, name := ids.SplitVolumeID(volumeID)
+		dataset := ids.Dataset(d.cfg.Pool, ns, name)
+		if d.zfs.Exists(dataset) {
+			continue
+		}
+		log.Printf("reconcile: tearing down orphan subsystem %s", nqn)
+		if err := d.target.TeardownVolume(nqn); err != nil {
+			return fmt.Errorf("teardown orphan %s: %w", nqn, err)
+		}
+	}
+	return nil
+}
+
+// Run serves the CSI gRPC API over the Unix socket until ctx is done.
+func (d *Driver) Run(ctx context.Context) error {
+	if err := os.MkdirAll(filepath.Dir(d.cfg.SocketPath), 0o755); err != nil {
+		return fmt.Errorf("mkdir socket dir: %w", err)
+	}
+	_ = os.Remove(d.cfg.SocketPath)
+	lis, err := net.Listen("unix", d.cfg.SocketPath)
+	if err != nil {
+		return fmt.Errorf("listen %s: %w", d.cfg.SocketPath, err)
+	}
+	if err := os.Chmod(d.cfg.SocketPath, 0o770); err != nil {
+		return fmt.Errorf("chmod socket: %w", err)
+	}
+
+	srv := grpc.NewServer()
+	csi.RegisterIdentityServer(srv, &identityServer{d: d})
+	switch d.cfg.Mode {
+	case ModeNode:
+		csi.RegisterNodeServer(srv, &nodeServer{d: d})
+	case ModeController:
+		csi.RegisterControllerServer(srv, &controllerServer{d: d})
+	default:
+		csi.RegisterControllerServer(srv, &controllerServer{d: d})
+		csi.RegisterNodeServer(srv, &nodeServer{d: d})
+	}
+
+	go func() {
+		<-ctx.Done()
+		srv.GracefulStop()
+	}()
+
+	log.Printf("serving CSI (%s mode) on %s", d.cfg.Mode, d.cfg.SocketPath)
+	return srv.Serve(lis)
+}
