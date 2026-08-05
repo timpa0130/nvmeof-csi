@@ -95,9 +95,9 @@ func (s *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 // DeleteVolume tears down the subsystem and destroys the zvol. Missing
 // volumes are reported as success.
 func (s *controllerServer) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest) (*csi.DeleteVolumeResponse, error) {
-	volumeID := req.GetVolumeId()
-	if volumeID == "" {
-		return nil, status.Error(codes.InvalidArgument, "volume id is required")
+	volumeID, err := requireVolumeID(req)
+	if err != nil {
+		return nil, err
 	}
 	ns, name := ids.SplitVolumeID(volumeID)
 	nqn := ids.NQN(volumeID)

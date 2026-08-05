@@ -6,6 +6,16 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// requireVolumeID returns the request's volume ID or an InvalidArgument
+// error if it is missing.
+func requireVolumeID(req interface{ GetVolumeId() string }) (string, error) {
+	id := req.GetVolumeId()
+	if id == "" {
+		return "", status.Error(codes.InvalidArgument, "volume id is required")
+	}
+	return id, nil
+}
+
 // validateCapabilities enforces v1 scope: block access only, single node
 // writer access mode only.
 func validateCapabilities(caps []*csi.VolumeCapability) error {

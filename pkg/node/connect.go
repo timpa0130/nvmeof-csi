@@ -5,17 +5,22 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 )
 
 const deviceWaitTimeout = 10 * time.Second
 
+// nsid of every subsystem's namespace. v1 exposes exactly one namespace
+// per subsystem, always with nsid 1.
+const nsid = 1
+
 // Connect establishes an NVMe-oF/TCP connection to the subsystem nqn at
 // traddr:trsvcid and waits for the controller device to appear.
 // Idempotent: an existing connection is a no-op.
 func Connect(ctx context.Context, nqn, traddr, trsvcid string) error {
-	if _, err := FindDeviceByNQN(nqn, 1); err == nil {
+	if _, err := FindDeviceByNQN(nqn); err == nil {
 		return nil
 	}
 	args := []string{"connect", "-t", "tcp", "-n", nqn, "-a", traddr}
@@ -26,7 +31,7 @@ func Connect(ctx context.Context, nqn, traddr, trsvcid string) error {
 	if err != nil {
 		// nvme connect fails with EEXIST when the controller is already
 		// attached; treat that as success.
-		if _, ferr := FindDeviceByNQN(nqn, 1); ferr == nil {
+		if _, ferr := FindDeviceByNQN(nqn); ferr == nil {
 			return nil
 		}
 		return fmt.Errorf("nvme connect: %w (%s)", err, strings.TrimSpace(string(out)))
@@ -38,7 +43,7 @@ func Connect(ctx context.Context, nqn, traddr, trsvcid string) error {
 func WaitForDevice(ctx context.Context, nqn string) error {
 	deadline := time.Now().Add(deviceWaitTimeout)
 	for time.Now().Before(deadline) {
-		if _, err := FindDeviceByNQN(nqn, 1); err == nil {
+		if _, err := FindDeviceByNQN(nqn); err == nil {
 			return nil
 		}
 		select {
@@ -56,7 +61,7 @@ func Disconnect(nqn string) error {
 	out, err := exec.Command("nvme", "disconnect", "-n", nqn).CombinedOutput()
 	if err != nil {
 		// Controller already gone -> success.
-		if _, ferr := FindDeviceByNQN(nqn, 1); ferr != nil {
+		if _, ferr := FindDeviceByNQN(nqn); ferr != nil {
 			return nil
 		}
 		return fmt.Errorf("nvme disconnect: %w (%s)", err, strings.TrimSpace(string(out)))
@@ -67,11 +72,8 @@ func Disconnect(nqn string) error {
 // FindDeviceByNQN returns the /dev/nvmeXnY device path for the given
 // subsystem NQN by scanning `nvme list-subsys -o json` for the
 // controller name and `nvme list -o json` for the device path. It never
-// hardcodes a device name. nsid identifies the namespace (v1 always 1).
-func FindDeviceByNQN(nqn string, nsid int) (string, error) {
-	if nsid <= 0 {
-		nsid = 1
-	}
+// hardcodes a device name.
+func FindDeviceByNQN(nqn string) (string, error) {
 	ctrl, err := controllerForNQN(nqn)
 	if err != nil {
 		return "", err
@@ -88,7 +90,7 @@ func FindDeviceByNQN(nqn string, nsid int) (string, error) {
 	if err := json.Unmarshal(out, &list); err != nil {
 		return "", fmt.Errorf("parse nvme list: %w", err)
 	}
-	want := "/dev/" + ctrl + "n" + fmt.Sprintf("%d", nsid)
+	want := "/dev/" + ctrl + "n" + strconv.Itoa(nsid)
 	for _, d := range list.Devices {
 		if d.DevicePath == want {
 			return d.DevicePath, nil

@@ -54,6 +54,11 @@ func NewDriver(cfg Config) (*Driver, error) {
 	if cfg.Mode == "" {
 		cfg.Mode = ModeAll
 	}
+	switch cfg.Mode {
+	case ModeAll, ModeController, ModeNode:
+	default:
+		return nil, fmt.Errorf("invalid mode %q (all|controller|node)", cfg.Mode)
+	}
 	return &Driver{
 		cfg:    cfg,
 		target: nvmet.New(),
@@ -114,7 +119,7 @@ func (d *Driver) Run(ctx context.Context) error {
 		csi.RegisterNodeServer(srv, &nodeServer{d: d})
 	case ModeController:
 		csi.RegisterControllerServer(srv, &controllerServer{d: d})
-	default:
+	case ModeAll:
 		csi.RegisterControllerServer(srv, &controllerServer{d: d})
 		csi.RegisterNodeServer(srv, &nodeServer{d: d})
 	}

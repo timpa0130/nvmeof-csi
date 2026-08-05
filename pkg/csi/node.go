@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"strconv"
 	"strings"
 	"syscall"
 
@@ -43,9 +42,9 @@ func (s *nodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolu
 	if err := validateCapabilities([]*csi.VolumeCapability{req.GetVolumeCapability()}); err != nil {
 		return nil, err
 	}
-	volumeID := req.GetVolumeId()
-	if volumeID == "" {
-		return nil, status.Error(codes.InvalidArgument, "volume id is required")
+	volumeID, err := requireVolumeID(req)
+	if err != nil {
+		return nil, err
 	}
 	nqn := ids.NQN(volumeID)
 	if err := node.Connect(ctx, nqn, s.d.cfg.TargetAddr, s.d.cfg.Port); err != nil {
@@ -56,9 +55,9 @@ func (s *nodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolu
 
 // NodeUnstageVolume disconnects the initiator from the target subsystem.
 func (s *nodeServer) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstageVolumeRequest) (*csi.NodeUnstageVolumeResponse, error) {
-	volumeID := req.GetVolumeId()
-	if volumeID == "" {
-		return nil, status.Error(codes.InvalidArgument, "volume id is required")
+	volumeID, err := requireVolumeID(req)
+	if err != nil {
+		return nil, err
 	}
 	nqn := ids.NQN(volumeID)
 	if err := node.Disconnect(nqn); err != nil {
@@ -76,18 +75,12 @@ func (s *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublish
 	if target == "" {
 		return nil, status.Error(codes.InvalidArgument, "target path is required")
 	}
-	volumeID := req.GetVolumeId()
-	if volumeID == "" {
-		return nil, status.Error(codes.InvalidArgument, "volume id is required")
+	volumeID, err := requireVolumeID(req)
+	if err != nil {
+		return nil, err
 	}
 	nqn := ids.NQN(volumeID)
-	nsid := 1
-	if s := req.GetVolumeContext()["nsid"]; s != "" {
-		if n, err := strconv.Atoi(s); err == nil {
-			nsid = n
-		}
-	}
-	dev, err := node.FindDeviceByNQN(nqn, nsid)
+	dev, err := node.FindDeviceByNQN(nqn)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "find device: %v", err)
 	}

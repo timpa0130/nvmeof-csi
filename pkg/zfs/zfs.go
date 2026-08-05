@@ -28,7 +28,7 @@ func (z *ZFS) CreateVolume(dataset string, sizeBytes int64) error {
 		return nil
 	}
 	parent := filepath.Dir(dataset)
-	if parent != z.Pool && !z.existsDataset(parent) {
+	if !z.existsDataset(parent) {
 		cmd := exec.Command("zfs", "create", "-p", "-o", "mountpoint=none", parent)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("zfs create parent %s: %w (%s)", parent, err, out)

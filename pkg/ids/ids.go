@@ -45,8 +45,7 @@ func SplitVolumeID(id string) (namespace, name string) {
 // never contain a dot, so the first dot in the leaf is always the
 // namespace/name boundary; names may themselves contain dots.
 func NQN(volumeID string) string {
-	namespace, name := SplitVolumeID(volumeID)
-	return NQNRoot + ":" + namespace + "." + name
+	return NQNRoot + ":" + encodeLeaf(volumeID)
 }
 
 // ParseNQN extracts the volume ID from one of our NQNs. It returns
@@ -56,12 +55,22 @@ func ParseNQN(nqn string) (volumeID string, ok bool) {
 	if !strings.HasPrefix(nqn, prefix) {
 		return "", false
 	}
-	leaf := strings.TrimPrefix(nqn, prefix)
+	return decodeLeaf(strings.TrimPrefix(nqn, prefix)), true
+}
+
+// encodeLeaf encodes a volume ID as the NQN leaf ("namespace.name").
+func encodeLeaf(volumeID string) string {
+	namespace, name := SplitVolumeID(volumeID)
+	return namespace + "." + name
+}
+
+// decodeLeaf decodes an NQN leaf back into a volume ID.
+func decodeLeaf(leaf string) string {
 	namespace, name, found := strings.Cut(leaf, ".")
 	if !found {
-		return DefaultNamespace + "/" + leaf, true
+		return DefaultNamespace + "/" + leaf
 	}
-	return namespace + "/" + name, true
+	return namespace + "/" + name
 }
 
 // ValidNamespace reports whether a namespace can be used as part of a
