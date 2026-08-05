@@ -34,7 +34,7 @@ func (z *ZFS) CreateVolume(dataset string, sizeBytes int64) error {
 			return fmt.Errorf("zfs create parent %s: %w (%s)", parent, err, out)
 		}
 	}
-	cmd := exec.Command("zfs", "create", "-V", fmt.Sprintf("%d", sizeBytes), "-o", "volblocksize=4k", dataset)
+	cmd := exec.Command("zfs", "create", "-V", fmt.Sprintf("%d", sizeBytes), "-o", "volblocksize=16K", dataset)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("zfs create %s: %w (%s)", dataset, err, out)
 	}
