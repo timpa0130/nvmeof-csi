@@ -1,0 +1,61 @@
+name: e2e
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  e2e:
+    # Pinned to 24.04: the hosted runner VMs run a real Ubuntu kernel, so
+    # the NVMe-oF (nvme/nvme_tcp/nvmet/nvmet_tcp) and ZFS (DKMS) kernel modules
+    # can actually be loaded, configfs can be mounted, and real block devices
+    # / zpools can be created — no mocking.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install NVMe-oF kernel modules and nvme CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y "linux-modules-extra-$(uname -r)" nvme-cli
+
+      - name: Load NVMe-oF modules and mount configfs
+        run: |
+          sudo modprobe nvme
+          sudo modprobe nvme_fabrics
+          sudo modprobe nvme_tcp
+          sudo modprobe nvmet
+          sudo modprobe nvmet_tcp 2>/dev/null || sudo modprobe nvmet-tcp 2>/dev/null || true
+          sudo mountpoint -q /sys/kernel/config || sudo mount -t configfs configfs /sys/kernel/config
+
+      - name: Install ZFS
+        run: |
+          sudo apt-get install -y zfsutils-linux zfs-dkms build-essential linux-headers-$(uname -r) libaio-dev
+          sudo modprobe zfs
+
+      - name: Create test pool
+        run: |
+          sudo truncate -s 8G /tmp/nvme-pool.img
+          sudo zpool create nvme /tmp/nvme-pool.img
+
+      - name: Build driver
+        run: go build -o bin/nvmeof-csi ./cmd/nvmeof-csi
+
+      - name: Install csc
+        run: |
+          go install github.com/rexray/gocsi/csc@latest
+          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+
+      - name: Unit tests (real ZFS on installed pool)
+        run: sudo /usr/local/go/bin/go test ./pkg/...
+
+      - name: Run e2e
+        run: sudo env CSC="$(go env GOPATH)/bin/csc" TARGET_ADDR=127.0.0.1 POOL=nvme TRSVCID=4420 ./test/manual/e2e.sh
