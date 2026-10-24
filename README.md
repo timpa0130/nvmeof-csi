@@ -55,20 +55,27 @@ sudo ./test/manual/e2e.sh
 ```
 
 ### Manual (csc)
+
 ```
-C="sudo csc --endpoint unix:///run/csi/nvmeof-csi.sock"
-$C identity plugin-info
-$C controller create-volume --cap SINGLE_NODE_WRITER,block --req-bytes 268435456 \
+# export PATH="$PATH:$HOME/go/bin"
+alias csc="sudo $HOME/go/bin/csc --endpoint unix:///run/csi/nvmeof-csi.sock"
+
+csc identity plugin-info
+
+csc controller create-volume --cap SINGLE_NODE_WRITER,block --req-bytes 268435456 \
   --params csi.storage.k8s.io/pvc/namespace=default,csi.storage.k8s.io/pvc/name=vol-a vol-a
-$C node stage   --staging-target-path /tmp/staging --cap SINGLE_NODE_WRITER,block default/vol-a
-$C node publish --target-path /tmp/pod --staging-target-path /tmp/staging \
+
+csc node stage   --staging-target-path /tmp/staging --cap SINGLE_NODE_WRITER,block default/vol-a
+# Mount the disk
+csc node publish --target-path /tmp/pod --staging-target-path /tmp/staging \
   --cap SINGLE_NODE_WRITER,block default/vol-a
+
 ls -l /tmp/pod
 dd if=/dev/urandom of=/tmp/orig bs=1M count=64 && dd if=/tmp/orig of=/tmp/pod \
   && dd if=/tmp/pod of=/tmp/copy && cmp /tmp/orig /tmp/copy
-$C node unpublish --target-path /tmp/pod default/vol-a
-$C node unstage   --staging-target-path /tmp/staging default/vol-a
-$C controller delete-volume default/vol-a
+csc node unpublish --target-path /tmp/pod default/vol-a
+csc node unstage   --staging-target-path /tmp/staging default/vol-a
+csc controller delete-volume default/vol-a
 ```
 
 ## Scope (v1)
