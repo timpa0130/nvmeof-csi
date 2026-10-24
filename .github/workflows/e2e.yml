@@ -8,11 +8,12 @@ on:
 
 jobs:
   e2e:
-    # Pinned to 24.04: the hosted runner VMs run a real Ubuntu kernel, so
+    # Pinned to 22.04: the hosted runner VMs run a real Ubuntu kernel, so
     # the NVMe-oF (nvme/nvme_tcp/nvmet/nvmet_tcp) and ZFS (DKMS) kernel modules
     # can actually be loaded, configfs can be mounted, and real block devices
-    # / zpools can be created — no mocking.
-    runs-on: ubuntu-24.04
+    # / zpools can be created — no mocking. ZFS (2.2.2) only supports kernels
+    # up to 6.6, so we need the 22.04 runner's kernel (5.15).
+    runs-on: ubuntu-22.04
     timeout-minutes: 60
 
     steps:
