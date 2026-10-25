@@ -1,0 +1,44 @@
+name: Set up NVMe-oF + ZFS
+description: >
+  Prepares a real (non-mocked) NVMe-oF/TCP and ZFS environment: kernel
+  modules, configfs, and the ZFS userspace/kernel module pair from the
+  Zabbly repo. Requires a runner whose kernel is the real kernel (hosted
+  Ubuntu VMs), and passwordless sudo.
+
+runs:
+  using: composite
+  steps:
+    - name: Install NVMe-oF kernel modules and nvme CLI
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y "linux-modules-extra-$(uname -r)" nvme-cli
+
+    - name: Load NVMe-oF modules and mount configfs
+      shell: bash
+      run: |
+        sudo modprobe nvme
+        sudo modprobe nvme_fabrics
+        sudo modprobe nvme_tcp
+        sudo modprobe nvmet
+        sudo modprobe nvmet_tcp 2>/dev/null || sudo modprobe nvmet-tcp 2>/dev/null || true
+        sudo mountpoint -q /sys/kernel/config || sudo mount -t configfs configfs /sys/kernel/config
+
+    - name: Install ZFS (Zabbly repo)
+      shell: bash
+      run: |
+        # Ubuntu's zfs-dkms sources only support kernels up to 5.19 (jammy)
+        # and hosted runners are far newer, so the DKMS build fails. The
+        # Zabbly repo ships ZFS 2.4.4 (kernels 4.18-7.2) with userspace and
+        # kernel module built from the same source, so there is no
+        # zfsutils-linux / zfs-kmod version mismatch.
+        # Build deps first: openzfs-zfs-dkms builds the module in its postinst.
+        sudo apt-get install -y curl build-essential "linux-headers-$(uname -r)" libaio-dev
+        sudo mkdir -p /etc/apt/keyrings
+        sudo curl -fsSL https://pkgs.zabbly.com/key.asc -o /etc/apt/keyrings/zabbly.asc
+        echo "deb [signed-by=/etc/apt/keyrings/zabbly.asc] https://pkgs.zabbly.com/kernel/stable noble zfs" | sudo tee /etc/apt/sources.list.d/zabbly-zfs.list
+        sudo apt-get update
+        # No openzfs-zfs-initramfs: nothing here reboots.
+        sudo apt-get install -y openzfs-zfsutils openzfs-zfs-dkms
+        sudo modprobe zfs
+        zfs version   # userspace + zfs-kmod must agree
