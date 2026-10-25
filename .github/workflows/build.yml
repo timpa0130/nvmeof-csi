@@ -19,6 +19,8 @@ on:
       - go.mod
       - go.sum
       - .github/workflows/build.yml
+  release:
+    types: [published]
 
 permissions:
   contents: read
@@ -62,3 +64,24 @@ jobs:
           push: ${{ github.event_name == 'push' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+  release:
+    if: github.event_name == 'release'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build Go binary
+        run: go build -o bin/nvmeof-csi ./cmd/nvmeof-csi
+
+      - name: Upload Go binary to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" bin/nvmeof-csi

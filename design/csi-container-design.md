@@ -27,6 +27,8 @@ flowchart LR
 - Triggered by changes to `Dockerfile`, `cmd/**`, `pkg/**`, `go.mod`, `go.sum`.
 - Pull requests: build image only (no push).
 - Push to `main`: push `latest` + `sha-<short>` tags.
+- Release published: build Go binary and upload to the GitHub release
+  (`gh release upload <tag> bin/nvmeof-csi`).
 
 ## Deployment
 
