@@ -55,7 +55,7 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
-            type=raw,value=latest,enable={{isDefaultBranch}}
+            type=raw,value=latest
             type=sha
 
       - uses: docker/build-push-action@v6
