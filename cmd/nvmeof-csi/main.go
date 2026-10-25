@@ -21,6 +21,7 @@ func main() {
 		port       = flag.String("port", csi.DefaultPort, "NVMe-oF/TCP port (trsvcid)")
 		pool       = flag.String("pool", "nvme", "ZFS pool for zvols")
 		mode       = flag.String("mode", "all", "services to serve: all|controller|node")
+		nodeID     = flag.String("node-id", "", "K8s node ID for NodeGetInfo (default: os hostname)")
 	)
 	flag.Parse()
 
@@ -32,9 +33,13 @@ func main() {
 		*targetAddr = ip
 	}
 
-	nodeID, err := os.Hostname()
-	if err != nil {
-		log.Fatalf("hostname: %v", err)
+	nodeIDValue := *nodeID
+	if nodeIDValue == "" {
+		host, herr := os.Hostname()
+		if herr != nil {
+			log.Fatalf("hostname: %v", herr)
+		}
+		nodeIDValue = host
 	}
 
 	driver, err := csi.NewDriver(csi.Config{
@@ -42,7 +47,7 @@ func main() {
 		TargetAddr: *targetAddr,
 		Port:       *port,
 		Pool:       *pool,
-		NodeID:     nodeID,
+		NodeID:     nodeIDValue,
 		Mode:       csi.Mode(*mode),
 	})
 	if err != nil {

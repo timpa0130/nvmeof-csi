@@ -138,7 +138,8 @@ sequenceDiagram
 
 - Driver builds cleanly; manual e2e flow exists (`test/manual/e2e.sh`).
 - Capability advertisement vs. implemented RPCs should be kept in sync
-  (identity: controller-only advertised; node: stage/unstage only advertised,
+  (identity: controller capability advertised for modes serving the
+  controller; node: stage/unstage advertised via NodeGetCapabilities,
   publish/unpublish implemented).
 - `ControllerPublishVolume`/`ControllerUnpublishVolume` are no-ops here while
   node publish does the real work — an architectural simplification worth

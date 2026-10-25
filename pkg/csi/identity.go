@@ -23,14 +23,25 @@ func (s *identityServer) GetPluginInfo(ctx context.Context, req *csi.GetPluginIn
 }
 
 func (s *identityServer) GetPluginCapabilities(ctx context.Context, req *csi.GetPluginCapabilitiesRequest) (*csi.GetPluginCapabilitiesResponse, error) {
-	caps := []*csi.PluginCapability{
-		{
-			Type: &csi.PluginCapability_Service_{
-				Service: &csi.PluginCapability_Service{Type: csi.PluginCapability_Service_CONTROLLER_SERVICE},
-			},
-		},
+	caps := []*csi.PluginCapability{}
+	// The CSI GetPluginCapabilities response carries controller service
+	// capabilities; the node service capability (e.g. STAGE_UNSTAGE_VOLUME)
+	// is advertised via the node service's NodeGetCapabilities instead. Only
+	// advertise what the configured mode actually serves.
+	if s.d.cfg.Mode == ModeAll || s.d.cfg.Mode == ModeController {
+		caps = append(caps, controllerServiceCapability())
 	}
 	return &csi.GetPluginCapabilitiesResponse{Capabilities: caps}, nil
+}
+
+// controllerServiceCapability advertises the controller service capability
+// (create/delete volume) via the identity service.
+func controllerServiceCapability() *csi.PluginCapability {
+	return &csi.PluginCapability{
+		Type: &csi.PluginCapability_Service_{
+			Service: &csi.PluginCapability_Service{Type: csi.PluginCapability_Service_CONTROLLER_SERVICE},
+		},
+	}
 }
 
 func (s *identityServer) Probe(ctx context.Context, req *csi.ProbeRequest) (*csi.ProbeResponse, error) {

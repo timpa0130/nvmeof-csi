@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nvmeof-csi-node
+  namespace: default
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nvmeof-csi
+      app.kubernetes.io/component: node
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nvmeof-csi
+        app.kubernetes.io/component: node
+    spec:
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: nvmeof-csi
+          # TODO: pin to a released image; placeholder for now.
+          image: timpa0130/nvmeof-csi:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true # nvmet configfs + /dev/nvme* access
+          args:
+            - --mode=node
+            - --socket=/run/csi/nvmeof-csi.sock
+            # Controller/backend host that initiator pods connect to.
+            - --target-addr=10.0.0.100
+            - --port=4420
+            - --pool=nvme
+            - --node-id=$(NODE_NAME)
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          volumeMounts:
+            - name: csi-socket
+              mountPath: /run/csi
+            - name: nvmet-config
+              mountPath: /sys/kernel/config
+      volumes:
+        - name: csi-socket
+          emptyDir: {}
+        - name: nvmet-config
+          hostPath:
+            path: /sys/kernel/config

@@ -6,7 +6,8 @@ Implements staging & publishing for the NVMe-oF/TCP block driver.
 
 ## RPCs
 
-- `NodeGetInfo` — returns configured `NodeID`.
+- `NodeGetInfo` — returns configured `NodeID`, sourced from the `--node-id`
+  flag (K8s node name) with an `os.Hostname()` fallback.
 - `NodeGetCapabilities` — advertises `STAGE_UNSTAGE_VOLUME`; publish/unpublish
   are implemented but not advertised.
 - `NodeStageVolume` — validates capability, connects initiator via NVMe-oF/TCP.

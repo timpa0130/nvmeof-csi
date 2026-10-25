@@ -26,6 +26,7 @@ NVMe-oF/TCP CSI driver. Block mode. Stateless. Tested with csc (no Kubernetes).
 - `pkg/nvmet` — target (configfs subsystem / namespace / port)
 - `pkg/zfs` — zvol backing store
 - `pkg/node` — initiator (nvme connect/disconnect, device lookup)
+- `deploy/` — Kubernetes manifests (CSIDriver, controller Deployment, node DaemonSet)
 - `test/manual` — e2e.sh
 
 ## Build
@@ -41,12 +42,21 @@ sudo bin/nvmeof-csi \
   --port 4420 \
   --pool nvme \
   --mode all        # all | controller | node
+  --node-id myhost  # optional; K8s node name for NodeGetInfo (default: os hostname)
 ```
 | mode | runs |
 |---|---|
 | `all` | controller + node (single host) |
 | `controller` | target side (EnsurePort + reconcile) |
 | `node` | worker host only (no target side) |
+
+## Deploy (Kubernetes)
+
+- `deploy/csi-nvmeof-csi.yaml` — `CSIDriver` object
+- `deploy/csi-nvmeof-controller.yaml` — controller Deployment (target side)
+- `deploy/csi-nvmeof-node.yaml` — node DaemonSet (initiator side, per worker node)
+
+Deploy controller + node DaemonSet across worker nodes; stage/publish via node.
 
 ## Test
 ```

@@ -1,0 +1,6 @@
+apiVersion: storage.k8s.io/v1
+kind: CSIDriver
+metadata:
+  name: nvmeof-csi
+spec:
+  driver: com.timpa0130.nvmeof-csi

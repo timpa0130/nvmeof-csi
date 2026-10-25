@@ -24,6 +24,11 @@ is derived from the volume ID.
 
 Identity is always registered; controller/node are mutually exclusive by mode.
 
+Capability advertisement mirrors the matrix: a mode that serves the controller
+advertises `CONTROLLER_SERVICE` via identity (`GetPluginCapabilities`), and a
+mode that serves the node advertises node RPC capabilities (e.g.
+`STAGE_UNSTAGE_VOLUME`) via the node service (`NodeGetCapabilities`).
+
 ## Run sequence
 
 ```mermaid
