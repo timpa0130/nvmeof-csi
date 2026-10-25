@@ -3,8 +3,18 @@ name: e2e
 on:
   push:
     branches: [main]
+    paths:
+      - pkg/**
+      - cmd/**
+      - test/manual/e2e.sh
+      - .github/**
   pull_request:
     branches: [main]
+    paths:
+      - pkg/**
+      - cmd/**
+      - test/manual/e2e.sh
+      - .github/**
 
 jobs:
   e2e:
