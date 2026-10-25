@@ -1,0 +1,1 @@
+../../../.opencode/skills/csi-design-docs/SKILL.md
