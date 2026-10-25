@@ -8,12 +8,7 @@ on:
 
 jobs:
   e2e:
-    # Pinned to 22.04: the hosted runner VMs run a real Ubuntu kernel, so
-    # the NVMe-oF (nvme/nvme_tcp/nvmet/nvmet_tcp) and ZFS (DKMS) kernel modules
-    # can actually be loaded, configfs can be mounted, and real block devices
-    # / zpools can be created — no mocking. ZFS (2.2.2) only supports kernels
-    # up to 6.6, so we need the 22.04 runner's kernel (5.15).
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
 
     steps:
@@ -37,10 +32,16 @@ jobs:
           sudo modprobe nvmet_tcp 2>/dev/null || sudo modprobe nvmet-tcp 2>/dev/null || true
           sudo mountpoint -q /sys/kernel/config || sudo mount -t configfs configfs /sys/kernel/config
 
-      - name: Install ZFS
+      - name: Install ZFS (Zabbly repo)
         run: |
-          sudo apt-get install -y zfsutils-linux zfs-dkms build-essential linux-headers-$(uname -r) libaio-dev
+          sudo apt-get install -y curl build-essential "linux-headers-$(uname -r)" libaio-dev
+          sudo mkdir -p /etc/apt/keyrings
+          sudo curl -fsSL https://pkgs.zabbly.com/key.asc -o /etc/apt/keyrings/zabbly.asc
+          echo "deb [signed-by=/etc/apt/keyrings/zabbly.asc] https://pkgs.zabbly.com/kernel/stable noble zfs" | sudo tee /etc/apt/sources.list.d/zabbly-zfs.list
+          sudo apt-get update
+          sudo apt-get install -y openzfs-zfsutils openzfs-zfs-dkms
           sudo modprobe zfs
+          zfs version   # userspace + zfs-kmod must agree
 
       - name: Create test pool
         run: |
