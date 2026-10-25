@@ -1,8 +1,9 @@
+{{- if .Values.node.enabled }}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
   name: nvmeof-csi-node
-  namespace: default
+  namespace: {{ .Release.Namespace }}
 spec:
   selector:
     matchLabels:
@@ -18,18 +19,16 @@ spec:
         - operator: Exists
       containers:
         - name: nvmeof-csi
-          # TODO: pin to a released image; placeholder for now.
-          image: timpa0130/nvmeof-csi:latest
-          imagePullPolicy: IfNotPresent
+          image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
             privileged: true # nvmet configfs + /dev/nvme* access
           args:
-            - --mode=node
+            - --mode={{ .Values.node.mode }}
             - --socket=/run/csi/nvmeof-csi.sock
-            # Controller/backend host that initiator pods connect to.
-            - --target-addr=10.0.0.100
-            - --port=4420
-            - --pool=nvme
+            - --target-addr={{ .Values.node.targetAddr }}
+            - --port={{ .Values.node.port }}
+            - --pool={{ .Values.node.pool }}
             - --node-id=$(NODE_NAME)
           env:
             - name: NODE_NAME
@@ -47,3 +46,4 @@ spec:
         - name: nvmet-config
           hostPath:
             path: /sys/kernel/config
+{{- end }}

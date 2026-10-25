@@ -1,0 +1,32 @@
+# Default values for nvmeof-csi.
+replicaCount: 1
+
+image:
+  repository: timpa0130/nvmeof-csi
+  tag: latest
+  pullPolicy: IfNotPresent
+
+csi:
+  # CSI plugin name advertised by the driver.
+  pluginName: com.timpa0130.nvmeof-csi
+  # Name of the CSIDriver custom resource.
+  csiDriverName: nvmeof-csi
+  pluginVersion: "1.0.0"
+
+controller:
+  enabled: true
+  replicaCount: 1
+  mode: controller
+  # Address initiators (K8s nodes / pods) connect to — the NVMe-oF/TCP
+  # backend host. May point at a single external storage node.
+  targetAddr: 192.168.1.207
+  port: "4420"
+  pool: nvme
+
+node:
+  enabled: true
+  mode: node
+  # NVMe-oF/TCP backend the node initiates to.
+  targetAddr: 192.168.1.207
+  port: "4420"
+  pool: nvme

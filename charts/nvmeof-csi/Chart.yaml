@@ -1,0 +1,6 @@
+apiVersion: v2
+name: nvmeof-csi
+description: NVMe-oF/TCP CSI driver for Kubernetes (block mode, SINGLE_NODE_WRITER)
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

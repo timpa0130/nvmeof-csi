@@ -1,10 +1,11 @@
+{{- if .Values.controller.enabled }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: nvmeof-csi-controller
-  namespace: default
+  namespace: {{ .Release.Namespace }}
 spec:
-  replicas: 1
+  replicas: {{ .Values.controller.replicaCount }}
   selector:
     matchLabels:
       app.kubernetes.io/name: nvmeof-csi
@@ -17,18 +18,16 @@ spec:
     spec:
       containers:
         - name: nvmeof-csi
-          # TODO: pin to a released image; placeholder for now.
-          image: timpa0130/nvmeof-csi:latest
-          imagePullPolicy: IfNotPresent
+          image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
             privileged: true # nvmet configfs + zvol device access
           args:
-            - --mode=controller
+            - --mode={{ .Values.controller.mode }}
             - --socket=/run/csi/nvmeof-csi.sock
-            # Controller/backend host that initiator nodes connect to.
-            - --target-addr=10.0.0.100
-            - --port=4420
-            - --pool=nvme
+            - --target-addr={{ .Values.controller.targetAddr }}
+            - --port={{ .Values.controller.port }}
+            - --pool={{ .Values.controller.pool }}
           volumeMounts:
             - name: csi-socket
               mountPath: /run/csi
@@ -45,3 +44,4 @@ spec:
         - name: zfs-dev
           hostPath:
             path: /dev/zvol
+{{- end }}

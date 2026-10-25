@@ -26,7 +26,7 @@ NVMe-oF/TCP CSI driver. Block mode. Stateless. Tested with csc (no Kubernetes).
 - `pkg/nvmet` — target (configfs subsystem / namespace / port)
 - `pkg/zfs` — zvol backing store
 - `pkg/node` — initiator (nvme connect/disconnect, device lookup)
-- `deploy/` — Kubernetes manifests (CSIDriver, controller Deployment, node DaemonSet)
+- `charts/nvmeof-csi` — Helm chart (CSIDriver, controller Deployment, node DaemonSet)
 - `test/manual` — e2e.sh
 
 ## Build
@@ -50,11 +50,17 @@ sudo bin/nvmeof-csi \
 | `controller` | target side (EnsurePort + reconcile) |
 | `node` | worker host only (no target side) |
 
-## Deploy (Kubernetes)
+## Deploy (Kubernetes via Helm)
 
-- `deploy/csi-nvmeof-csi.yaml` — `CSIDriver` object
-- `deploy/csi-nvmeof-controller.yaml` — controller Deployment (target side)
-- `deploy/csi-nvmeof-node.yaml` — node DaemonSet (initiator side, per worker node)
+- `charts/nvmeof-csi/templates/csi-driver.yaml` — `CSIDriver` object
+- `charts/nvmeof-csi/templates/controller.yaml` — controller Deployment (target side)
+- `charts/nvmeof-csi/templates/node-daemonset.yaml` — node DaemonSet (initiator side, per worker node)
+
+```
+helm install nvmeof-csi charts/nvmeof-csi \
+  --set controller.targetAddr=10.0.0.100 \
+  --set node.targetAddr=10.0.0.100
+```
 
 Deploy controller + node DaemonSet across worker nodes; stage/publish via node.
 
