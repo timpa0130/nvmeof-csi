@@ -28,6 +28,7 @@ intended design.
 | `pkg/node/connect.go` | `design/csi-nvme-design.md` |
 | `pkg/ids/*` | `design/csi-ids-design.md` |
 | `test/manual/e2e.sh` | `design/csi-e2e-design.md` |
+| container image (`Dockerfile`, build workflow) | `design/csi-container-design.md` |
 | cross-cutting / whole driver | `design/csi-driver-design.md` |
 
 ## Workflow

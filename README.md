@@ -44,6 +44,22 @@ sudo bin/nvmeof-csi \
   --mode all        # all | controller | node
   --node-id myhost  # optional; K8s node name for NodeGetInfo (default: os hostname)
 ```
+
+### Controller on an external storage node
+
+When the storage backend lives on a single external node (e.g. `192.168.1.207`)
+and initiator mounters run on K8s worker nodes, run the driver in controller
+mode on the storage node:
+
+```
+sudo ./bin/nvmeof-csi \
+  --mode=controller \
+  --socket=/run/csi/nvmeof-csi.sock \
+  --target-addr=192.168.1.207 \
+  --port=4420 \
+  --pool=nvme
+```
+
 | mode | runs |
 |---|---|
 | `all` | controller + node (single host) |
