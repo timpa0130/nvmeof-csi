@@ -7,6 +7,14 @@ runs, how one binary becomes a controller or a node process, and how every
 backend name is derived from the volume ID. The per-volume flows live in
 `volume-lifecycle.md`; how it is packaged and run lives in `deployment.md`.
 
+## Glossary
+
+| Term | Means | Not to be confused with |
+| --- | --- | --- |
+| Controller | `nvmeof-csi --mode=controller` on the storage host: the CSI Controller service that creates and deletes volumes (ZFS + nvmet) | csi-provisioner's own "provisioner controller" log wording (a Kubernetes control loop) |
+| Provisioner | upstream `csi-provisioner` in the chart's `nvmeof-csi-provisioner` pod: watches PVCs, calls the controller's `CreateVolume`/`DeleteVolume` | the StorageClass `provisioner:` field, which is the driver name `com.timpa0130.nvmeof-csi` |
+| Node | `nvmeof-csi --mode=node` in the chart's DaemonSet: connects, stages and publishes volumes for kubelet | a Kubernetes `Node` object |
+
 ## What the driver is
 
 One Go binary (`cmd/nvmeof-csi`) that speaks CSI over gRPC. Stateless: no
@@ -38,7 +46,7 @@ flowchart LR
 
 | Box | Exact component | Code |
 | --- | --- | --- |
-| Provisioner | `external-provisioner` sidecar, dials `--csi-address=tcp://<host>:9090` | — |
+| Provisioner | `external-provisioner` in the chart's provisioner `Deployment`; reaches `<host>:9090` through a socat unix→TCP sidecar | — |
 | Controller | `nvmeof-csi --mode=controller` on the target host | `pkg/csi/controller.go` |
 | ZFS zvol | `<pool>/<namespace>/<pvc>`, `/dev/zvol/...` | `pkg/zfs` |
 | nvmet target | `/sys/kernel/config/nvmet`, port `1`, one subsystem per volume | `pkg/nvmet` |

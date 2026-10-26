@@ -26,7 +26,7 @@ NVMe-oF/TCP CSI driver. Block mode. Stateless. Tested with csc (no Kubernetes).
 - `pkg/nvmet` — target (configfs subsystem / namespace / port)
 - `pkg/zfs` — zvol backing store
 - `pkg/node` — initiator (nvme connect/disconnect, device lookup)
-- `charts/nvmeof-csi` — Helm chart (CSIDriver, controller Deployment, node DaemonSet)
+- `charts/nvmeof-csi` — Helm chart (CSIDriver, provisioner Deployment, node DaemonSet, StorageClass)
 - `test/manual` — e2e.sh
 
 ## Build
@@ -69,16 +69,17 @@ sudo ./bin/nvmeof-csi \
 ## Deploy (Kubernetes via Helm)
 
 - `charts/nvmeof-csi/templates/csi-driver.yaml` — `CSIDriver` object
-- `charts/nvmeof-csi/templates/controller.yaml` — controller Deployment (target side)
+- `charts/nvmeof-csi/templates/provisioner.yaml` — external-provisioner Deployment, dials the controller over TCP
 - `charts/nvmeof-csi/templates/node-daemonset.yaml` — node DaemonSet (initiator side, per worker node)
+
+The controller is not in the chart; run it on the storage host with
+`deploy/systemd/nvmeof-csi-controller.service`.
 
 ```
 helm install nvmeof-csi charts/nvmeof-csi \
-  --set controller.targetAddr=10.0.0.100 \
+  --set provisioner.controllerAddr=10.0.0.100:9090 \
   --set node.targetAddr=10.0.0.100
 ```
-
-Deploy controller + node DaemonSet across worker nodes; stage/publish via node.
 
 ## Test
 ```

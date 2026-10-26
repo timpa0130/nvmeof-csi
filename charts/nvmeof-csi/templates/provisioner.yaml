@@ -1,0 +1,92 @@
+{{- if .Values.provisioner.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: nvmeof-csi-provisioner
+  namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: nvmeof-csi-provisioner
+rules:
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "update"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses", "csinodes", "volumeattachments"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["list", "watch", "create", "update", "patch"]
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshots"]
+    verbs: ["get", "list", "watch", "update"]
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshotcontents"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: nvmeof-csi-provisioner
+subjects:
+  - kind: ServiceAccount
+    name: nvmeof-csi-provisioner
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: ClusterRole
+  name: nvmeof-csi-provisioner
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nvmeof-csi-provisioner
+  namespace: {{ .Release.Namespace }}
+spec:
+  # Single replica, so no leader election (and no leases Role).
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nvmeof-csi
+      app.kubernetes.io/component: provisioner
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nvmeof-csi
+        app.kubernetes.io/component: provisioner
+    spec:
+      serviceAccountName: nvmeof-csi-provisioner
+      containers:
+        - name: csi-provisioner
+          image: registry.k8s.io/sig-storage/csi-provisioner:v6.4.0
+          args:
+            - --csi-address=/run/csi/csi.sock
+            # Passes csi.storage.k8s.io/pvc/{namespace,name} to CreateVolume,
+            # which the controller uses to name the zvol and NQN.
+            - --extra-create-metadata
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /run/csi
+        # csi-provisioner only dials unix sockets (connection-loss handling
+        # is unix-only), so bridge a local socket to the controller's TCP
+        # endpoint.
+        - name: csi-proxy
+          image: alpine/socat:1.8.0.3
+          args:
+            - UNIX-LISTEN:/run/csi/csi.sock,fork,unlink-early
+            - TCP:{{ .Values.provisioner.controllerAddr }}
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /run/csi
+      volumes:
+        - name: socket-dir
+          emptyDir: {}
+{{- end }}

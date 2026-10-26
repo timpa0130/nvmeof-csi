@@ -15,23 +15,16 @@ csi:
 storageClass:
   name: nvmeof-csi
 
-controller:
-  enabled: false
-  replicaCount: 1
-  mode: controller
-  # Optional TCP address to also serve the CSI gRPC API on, for sidecars
-  # (e.g. external-provisioner) running on other hosts. Empty = disabled.
-  listen: ""
-  # Address initiators (K8s nodes / pods) connect to — the NVMe-oF/TCP
-  # backend host. May point at a single external storage node.
-  targetAddr: 192.168.1.107
-  port: "4420"
-  pool: nvme
+provisioner:
+  enabled: true
+  # gRPC TCP endpoint of the controller on the storage host
+  # (NVMEOF_CSI_LISTEN of nvmeof-csi-controller.service).
+  controllerAddr: 192.168.1.10:9090
 
 node:
   enabled: true
   mode: node
   # NVMe-oF/TCP backend the node initiates to.
-  targetAddr: 192.168.1.107
+  targetAddr: 192.168.1.10
   port: "4420"
   pool: nvme

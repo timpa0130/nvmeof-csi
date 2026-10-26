@@ -23,7 +23,7 @@ flowchart LR
 | --- | --- |
 | Static binary | `CGO_ENABLED=0 go build -o bin/nvmeof-csi ./cmd/nvmeof-csi` |
 | Container image | `Dockerfile`: `alpine` + `nvme-cli` + `e2fsprogs` → `ghcr.io/timpa0130/nvmeof-csi` |
-| Helm chart | `charts/nvmeof-csi`: `CSIDriver`, node `DaemonSet`, optional controller `Deployment`, `StorageClass` |
+| Helm chart | `charts/nvmeof-csi`: `CSIDriver`, node `DaemonSet`, provisioner `Deployment`, `StorageClass` (no controller: it runs on the target host) |
 | K8s nodes | node plugin `--mode=node` on every worker |
 | systemd unit | `deploy/systemd/nvmeof-csi-controller.service` + `.env` |
 | Target host | controller `--mode=controller --listen=...` on 192.168.1.107 |
@@ -42,7 +42,8 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    EP["Provisioner"] -->|"gRPC TCP"| CTRL["Controller"]
+    EP["Provisioner"] -->|"unix socket"| PROXY["Socket proxy"]
+    PROXY -->|"gRPC TCP"| CTRL["Controller"]
     REG["Registrar"] --> NODE["Node plugin"]
     KUBELET["kubelet"] -->|"unix socket"| NODE
     NODE -->|"NVMe/TCP"| TGT["Target host"]
@@ -52,20 +53,22 @@ flowchart LR
 | --- | --- |
 | `csi-driver.yaml` | `CSIDriver` named `csi.pluginName` (`com.timpa0130.nvmeof-csi`, must equal `GetPluginInfo`); `attachRequired: false`; `fsGroupPolicy: File` |
 | `node-daemonset.yaml` | `--mode=node`, `--node-id=$(NODE_NAME)` (`spec.nodeName`), `--target-addr=node.targetAddr`; socket `/var/lib/kubelet/plugins/<pluginName>/csi.sock` (hostPath); `csi-node-driver-registrar` sidecar; `/var/lib/kubelet` with `Bidirectional` propagation; `/dev`; `/sys/block` (for the I/O cap) |
-| `controller.yaml` | only when `controller.enabled` (default `false`); `privileged: true`; mounts `/sys/kernel/config`, `/dev/zvol`; args `--mode`, `--socket`, `--listen`, `--target-addr`, `--port`, `--pool` |
 | `storageclass.yaml` | `StorageClass` `storageClass.name` with `provisioner: csi.pluginName` |
+| `provisioner.yaml` | only when `provisioner.enabled` (default `true`); `ServiceAccount`, `ClusterRole`, `ClusterRoleBinding`, 1-replica `Deployment`, all `nvmeof-csi-provisioner`; `csi-provisioner:v6.4.0` with `--csi-address=/run/csi/csi.sock`, `--extra-create-metadata`; `csi-proxy` sidecar `alpine/socat:1.8.0.3` bridging that socket (`emptyDir`) to `TCP:provisioner.controllerAddr` |
 
 | Value | Default |
 | --- | --- |
+| `provisioner.enabled` | `true` |
+| `provisioner.controllerAddr` | `192.168.1.10:9090` (must match the controller's `--listen`) |
 | `image.repository` / `tag` / `pullPolicy` | `ghcr.io/timpa0130/nvmeof-csi` / `latest` / `Always` |
-| `controller.listen` | `""` (off); set to expose gRPC over TCP for remote sidecars |
-| `controller.targetAddr`, `node.targetAddr` | `192.168.1.107` |
+| `node.targetAddr` | `192.168.1.10` |
 | `*.port`, `*.pool` | `4420`, `nvme` |
 
 ## Controller as a systemd service
 
-Runs `nvmeof-csi --mode=controller` on the target host outside Kubernetes;
-replaces the chart's controller `Deployment` (`controller.enabled: false`).
+Runs `nvmeof-csi --mode=controller` on the target host outside Kubernetes.
+This is the only supported way to run the controller; the chart has no
+controller workload.
 
 ```mermaid
 flowchart LR
@@ -83,7 +86,7 @@ flowchart LR
 | configfs mounted | `Requires=` / `After=sys-kernel-config.mount` |
 | Load nvmet modules | `ExecStartPre=+/sbin/modprobe -a nvmet nvmet_tcp`; `After=systemd-modules-load.service` |
 | Controller service | `nvmeof-csi-controller.service`, `ExecStart=/usr/local/bin/nvmeof-csi --mode=controller ...` |
-| gRPC over TCP | `--listen=${NVMEOF_CSI_LISTEN}`; provisioner dials `tcp://192.168.1.107:9090` |
+| gRPC over TCP | `--listen=${NVMEOF_CSI_LISTEN}`; the chart's `csi-proxy` sidecar dials `provisioner.controllerAddr` |
 
 | Repo file | Installed as |
 | --- | --- |
@@ -132,6 +135,16 @@ journalctl -u nvmeof-csi-controller -f
 - Stopping the controller does not touch exports: they live in kernel
   configfs, so initiators keep I/O; only provisioning pauses.
 - The gRPC TCP endpoint has no TLS or auth; bind it to the storage network.
+- `csi-provisioner` cannot dial TCP: `csi-lib-utils` rejects its
+  connection-loss callback for non-`unix://` addresses. The socat sidecar
+  gives it a local socket; if the TCP side drops, the provisioner exits on
+  connection loss and its container restarts.
+- The provisioner ships in the chart so deleting and reinstalling the
+  release brings it back; before, a hand-applied provisioner was lost with
+  the namespace and PVCs stayed `Pending`.
+- Remove workloads and PVCs that use the driver before uninstalling the
+  release. Otherwise pods using its volumes cannot unmount and hang in
+  termination, and so does the namespace.
 - `zfs-volumes.target` orders start after `/dev/zvol/*` exists; if
   `zfs-volume-wait.service` is not enabled the `After=` is a no-op.
 - `CapabilityBoundingSet` is the tightest set the code needs; drop it if a
