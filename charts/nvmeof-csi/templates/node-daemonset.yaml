@@ -46,6 +46,8 @@ spec:
               mountPropagation: Bidirectional
             - name: dev
               mountPath: /dev
+            - name: sys-block
+              mountPath: /sys/block
             - name: nvmet-config
               mountPath: /sys/kernel/config
         - name: node-driver-registrar
@@ -74,6 +76,10 @@ spec:
         - name: dev
           hostPath:
             path: /dev
+            type: Directory
+        - name: sys-block
+          hostPath:
+            path: /sys/block
             type: Directory
         - name: nvmet-config
           hostPath:

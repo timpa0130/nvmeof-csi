@@ -26,7 +26,8 @@ artifacts for the NVMe-oF/TCP CSI driver: the `CSIDriver` object, the controller
   dial it; a `csi-node-driver-registrar` sidecar registers the driver with
   kubelet; `/var/lib/kubelet` is mounted with `Bidirectional` mount
   propagation so driver-created mounts are visible to pods; `/dev` is mounted
-  for `nvme connect` and the device nodes.
+  for `nvme connect` and the device nodes; `/sys/block` is mounted so the
+  driver can cap the device's `max_sectors_kb` (see `csi-nvme-design.md`).
 - `templates/storageclass.yaml` — renders the `StorageClass` named
   `storageClass.name` with `provisioner: csi.pluginName` (external-provisioner
   claims PVCs of classes matching the connected driver).

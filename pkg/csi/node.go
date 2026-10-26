@@ -57,7 +57,12 @@ func (s *nodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolu
 	}
 	mountCap := req.GetVolumeCapability().GetMount()
 	if mountCap == nil {
-		return &csi.NodeStageVolumeResponse{}, nil // block: the connection is the staging
+		// Block: the connection is the staging — but still cap the
+		// device's I/O size (target rejects chained SGLs otherwise).
+		if err := node.CapMaxSectors(nqn); err != nil {
+			return nil, status.Errorf(codes.Internal, "cap max sectors: %v", err)
+		}
+		return &csi.NodeStageVolumeResponse{}, nil
 	}
 	staging := req.GetStagingTargetPath()
 	if staging == "" {
@@ -69,6 +74,9 @@ func (s *nodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolu
 	dev, err := node.FindDeviceByNQN(nqn)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "find device: %v", err)
+	}
+	if err := node.CapMaxSectors(nqn); err != nil {
+		return nil, status.Errorf(codes.Internal, "cap max sectors: %v", err)
 	}
 	if err := os.MkdirAll(staging, 0o750); err != nil {
 		return nil, status.Errorf(codes.Internal, "create staging dir: %v", err)

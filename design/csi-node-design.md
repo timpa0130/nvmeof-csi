@@ -41,6 +41,7 @@ sequenceDiagram
     participant N as node service
     EP->>N: NodeStageVolume
     N->>N: nvme connect (initiator)
+    N->>N: cap device max I/O at 1 MB (single SGL segment)
     alt block mode
         N-->>EP: staged (connection only)
     else filesystem mode
