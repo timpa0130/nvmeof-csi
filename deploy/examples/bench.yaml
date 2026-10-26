@@ -1,0 +1,120 @@
+# dd + fio benchmark for a volume from the nvmeof-csi StorageClass.
+#
+# A 10Gi RWO filesystem PVC mounted by a single-replica Deployment. On start
+# the pod installs fio, runs bench.sh once and then idles so it can be rerun.
+# All I/O is O_DIRECT so the pod's page cache is bypassed; reads can still be
+# served from the target's ZFS ARC.
+#
+#   kubectl apply -f deploy/examples/bench.yaml
+#   kubectl logs -f deploy/nvmeof-bench
+#   kubectl exec deploy/nvmeof-bench -- /bench/bench.sh            # rerun
+#   kubectl exec deploy/nvmeof-bench -- env RUNTIME=60 /bench/bench.sh
+#   kubectl delete -f deploy/examples/bench.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nvmeof-bench
+spec:
+  storageClassName: nvmeof-csi
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nvmeof-bench
+data:
+  bench.sh: |
+    #!/bin/bash
+    # SIZE: fio test file size; DD_SIZE: dd transfer size (staged in RAM);
+    # RUNTIME: seconds per fio job.
+    set -euo pipefail
+    DIR=${DIR:-/data}
+    SIZE=${SIZE:-4G}
+    DD_SIZE=${DD_SIZE:-1G}
+    RUNTIME=${RUNTIME:-30}
+    file=$DIR/bench.bin
+
+    # Random source so ZFS compression on the zvol can't inflate the numbers.
+    count=$(( $(numfmt --from=iec "$DD_SIZE") / 1048576 ))
+    dd if=/dev/urandom of=/src/rand.bin bs=1M count="$count" status=none
+
+    echo "== dd ${DD_SIZE} bs=1M O_DIRECT"
+    printf 'write  '; dd if=/src/rand.bin of="$file" bs=1M oflag=direct conv=fsync 2>&1 | tail -1
+    printf 'read   '; dd if="$file" of=/dev/null bs=1M iflag=direct 2>&1 | tail -1
+    rm -f /src/rand.bin "$file"
+
+    run() {
+      local name=$1; shift
+      fio --name="$name" --filename="$file" --size="$SIZE" \
+        --direct=1 --ioengine=libaio --time_based --runtime="$RUNTIME" \
+        --ramp_time=5 --group_reporting --output-format=json "$@" 2>/dev/null |
+        jq -r --arg n "$name" '.jobs[0] | (.read, .write) | select(.io_bytes > 0) |
+          "\($n)\t\((.bw / 1024) | floor) MiB/s\t\(.iops | floor) IOPS\tp99 \(((.clat_ns.percentile["99.000000"] // 0) / 1000) | floor) us"'
+    }
+
+    echo "== fio ${SIZE} file, ${RUNTIME}s per job"
+    {
+      printf 'job\tbandwidth\tiops\tlatency\n'
+      run seq-write-1m     --rw=write     --bs=1M --iodepth=16
+      run seq-read-1m      --rw=read      --bs=1M --iodepth=16
+      run rand-write-4k    --rw=randwrite --bs=4k --iodepth=32 --numjobs=4
+      run rand-read-4k     --rw=randread  --bs=4k --iodepth=32 --numjobs=4
+      run rand-write-4k-qd1 --rw=randwrite --bs=4k --iodepth=1
+      run rand-read-4k-qd1  --rw=randread  --bs=4k --iodepth=1
+    } | column -t -s $'\t'
+    rm -f "$file"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nvmeof-bench
+spec:
+  replicas: 1
+  # RWO volume: the old pod must release it before the new one stages it.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: nvmeof-bench
+  template:
+    metadata:
+      labels:
+        app: nvmeof-bench
+    spec:
+      containers:
+        - name: bench
+          image: debian:bookworm-slim
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+              apt-get update -qq
+              apt-get install -y -qq --no-install-recommends fio jq bsdextrautils >/dev/null
+              /bench/bench.sh
+              exec sleep infinity
+          resources:
+            limits:
+              memory: 2Gi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: script
+              mountPath: /bench
+            - name: src
+              mountPath: /src
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: nvmeof-bench
+        - name: script
+          configMap:
+            name: nvmeof-bench
+            defaultMode: 0755
+        # RAM-backed so the dd source read doesn't bottleneck the write.
+        - name: src
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1200Mi
