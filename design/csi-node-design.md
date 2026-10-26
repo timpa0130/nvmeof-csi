@@ -25,6 +25,14 @@ filesystem mode.
     target directory.
 - `NodeUnpublishVolume` — unmounts target.
 
+## Ownership
+
+The node service never applies uid/gid to staged/published volumes — the
+request cannot know the consuming workload's identity. Ownership comes from
+the pod (`securityContext.fsGroup`) applied by kubelet under the CSIDriver's
+`fsGroupPolicy: File`. Driver-side chown would be redundant (and would fight
+kubelet) under this policy.
+
 ## Stage flow
 
 ```mermaid

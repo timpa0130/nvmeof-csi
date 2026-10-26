@@ -62,6 +62,12 @@ flowchart TB
   `node.targetAddr`.
 - Storage backend may live on a single external node while mounters run on
   K8s worker nodes.
+- **Filesystem ownership contract**: the driver does not apply uid/gid —
+  the CSI request cannot know the consuming workload's identity. The
+  CSIDriver declares `fsGroupPolicy: File`, so pods that need specific
+  ownership (e.g. postgres' uid/gid 999) set `securityContext.fsGroup` and
+  kubelet applies group ownership on the staged volume. Pod-level config;
+  driver stays out of it.
 
 ## Open questions
 
