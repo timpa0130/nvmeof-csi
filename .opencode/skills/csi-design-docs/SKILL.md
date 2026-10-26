@@ -29,6 +29,7 @@ intended design.
 | `pkg/ids/*` | `design/csi-ids-design.md` |
 | `test/manual/e2e.sh` | `design/csi-e2e-design.md` |
 | container image (`Dockerfile`, build workflow) | `design/csi-container-design.md` |
+| incident analysis: >4 MiB write rejection | `design/incident-nvmet-tcp-4mib-write-rejection.md` |
 | cross-cutting / whole driver | `design/csi-driver-design.md` |
 
 ## Workflow
