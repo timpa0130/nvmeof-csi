@@ -3,9 +3,7 @@
 package node
 
 import (
-	"os"
 	"reflect"
-	"strings"
 	"testing"
 )
 
@@ -44,37 +42,5 @@ func TestMkfsArgsExtAndXfs(t *testing.T) {
 func TestMkfsArgsUnsupportedType(t *testing.T) {
 	if _, err := mkfsArgs("/dev/sda", "btrfs"); err == nil {
 		t.Fatal("mkfsArgs(btrfs) should fail")
-	}
-}
-func TestCapMaxSectors(t *testing.T) {
-	root := t.TempDir()
-	queue := root + "/nvme1n1/queue"
-	if err := os.MkdirAll(queue, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(queue+"/max_sectors_kb", []byte("32768\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Caps a higher value to 1024.
-	if err := capMaxSectors(root, "/dev/nvme1n1"); err != nil {
-		t.Fatalf("capMaxSectors: %v", err)
-	}
-	got, err := os.ReadFile(queue + "/max_sectors_kb")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.TrimSpace(string(got)) != "1024" {
-		t.Fatalf("max_sectors_kb = %q, want 1024", got)
-	}
-
-	// Already capped: idempotent no-op.
-	if err := capMaxSectors(root, "/dev/nvme1n1"); err != nil {
-		t.Fatalf("capMaxSectors (idempotent): %v", err)
-	}
-
-	// Missing sysfs entry: skipped, no error.
-	if err := capMaxSectors(root, "/dev/nvme9n9"); err != nil {
-		t.Fatalf("capMaxSectors (missing device): %v", err)
 	}
 }

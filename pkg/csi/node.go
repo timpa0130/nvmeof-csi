@@ -55,13 +55,19 @@ func (s *nodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolu
 	if err := node.Connect(ctx, nqn, s.d.cfg.TargetAddr, s.d.cfg.Port); err != nil {
 		return nil, status.Errorf(codes.Internal, "stage volume: %v", err)
 	}
+	ns, err := node.LookupNamespace(nqn)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "find namespace: %v", err)
+	}
+	// Cap before anything else — a re-stage of an already-mounted volume
+	// must still re-assert the cap (the target rejects commands above its
+	// 4 MiB H2CData bound).
+	if err := ns.CapIO(); err != nil {
+		return nil, status.Errorf(codes.Internal, "cap I/O size: %v", err)
+	}
 	mountCap := req.GetVolumeCapability().GetMount()
 	if mountCap == nil {
-		// Block: the connection is the staging — but still cap the
-		// device's I/O size (target rejects chained SGLs otherwise).
-		if err := node.CapMaxSectors(nqn); err != nil {
-			return nil, status.Errorf(codes.Internal, "cap max sectors: %v", err)
-		}
+		// Block: the connection is the staging.
 		return &csi.NodeStageVolumeResponse{}, nil
 	}
 	staging := req.GetStagingTargetPath()
@@ -71,13 +77,7 @@ func (s *nodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolu
 	if isMounted(staging) {
 		return &csi.NodeStageVolumeResponse{}, nil
 	}
-	dev, err := node.FindDeviceByNQN(nqn)
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "find device: %v", err)
-	}
-	if err := node.CapMaxSectors(nqn); err != nil {
-		return nil, status.Errorf(codes.Internal, "cap max sectors: %v", err)
-	}
+	dev := ns.Head
 	if err := os.MkdirAll(staging, 0o750); err != nil {
 		return nil, status.Errorf(codes.Internal, "create staging dir: %v", err)
 	}
@@ -159,10 +159,11 @@ func (s *nodeServer) publishFilesystem(staging, target string) (*csi.NodePublish
 
 // publishBlock bind-mounts the block device onto the target file.
 func (s *nodeServer) publishBlock(req *csi.NodePublishVolumeRequest, nqn, target string) (*csi.NodePublishVolumeResponse, error) {
-	dev, err := node.FindDeviceByNQN(nqn)
+	ns, err := node.LookupNamespace(nqn)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "find device: %v", err)
+		return nil, status.Errorf(codes.Internal, "find namespace: %v", err)
 	}
+	dev := ns.Head
 	// For block volumes the target path is a file (the device is
 	// bind-mounted onto it), not a directory.
 	if st, serr := os.Stat(target); serr == nil {

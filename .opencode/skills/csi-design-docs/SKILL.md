@@ -25,7 +25,7 @@ intended design.
 | `pkg/csi/helpers.go` | `design/csi-helpers-design.md` |
 | `pkg/nvmet/*` | `design/csi-nvmet-design.md` |
 | `pkg/zfs/*` | `design/csi-zfs-design.md` |
-| `pkg/node/connect.go` | `design/csi-nvme-design.md` |
+| `pkg/node/*` | `design/csi-nvme-design.md` |
 | `pkg/ids/*` | `design/csi-ids-design.md` |
 | `test/manual/e2e.sh` | `design/csi-e2e-design.md` |
 | container image (`Dockerfile`, build workflow) | `design/csi-container-design.md` |

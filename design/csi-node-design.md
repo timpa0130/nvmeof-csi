@@ -11,9 +11,11 @@ filesystem mode.
   flag (K8s node name) with an `os.Hostname()` fallback.
 - `NodeGetCapabilities` — advertises `STAGE_UNSTAGE_VOLUME`; publish/unpublish
   are implemented but not advertised.
-- `NodeStageVolume` — validates capability, connects initiator via NVMe-oF/TCP.
+- `NodeStageVolume` — validates capability, connects initiator via NVMe-oF/TCP,
+  looks up the namespace and caps its I/O size (every stage, before the
+  already-mounted early return, so a re-stage re-asserts the cap).
   - Block mode: connection is the staging (no filesystem work).
-  - Filesystem mode: finds the device, creates the requested filesystem
+  - Filesystem mode: uses the namespace head device, creates the requested filesystem
     (`fsType`, default `ext4`) only when the device has none (blkid probe),
     then mounts the device at the staging path.
 - `NodeUnstageVolume` — unmounts the staging path when mounted (filesystem
@@ -41,12 +43,12 @@ sequenceDiagram
     participant N as node service
     EP->>N: NodeStageVolume
     N->>N: nvme connect (initiator)
-    N->>N: cap device max I/O at 1 MB (single SGL segment)
+    N->>N: look up namespace (head + paths)
+    N->>N: cap I/O at 1 MB on every namespace device
     alt block mode
         N-->>EP: staged (connection only)
     else filesystem mode
-        N->>N: find /dev/nvmeXnY
-        N->>N: blkid probe; mkfs if no fs
+        N->>N: blkid probe head; mkfs if no fs
         N->>N: mount dev -> staging path
         N-->>EP: staged
     end
