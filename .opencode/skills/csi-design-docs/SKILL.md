@@ -1,77 +1,91 @@
 ---
 name: csi-design-docs
 description: >
-  Creates and maintains design documents for the NVMe-oF/TCP CSI driver
-  under design/. Use when writing, editing, refactoring, or reviewing code
-  in cmd/, pkg/, or test/ so the implementation stays aligned with the
-  design docs. Also use when adding a new component, RPC, or backend.
+  Maintains the few high-level design documents for the NVMe-oF/TCP CSI
+  driver under design/ (architecture, volume lifecycle, deployment). Use when
+  writing, editing, refactoring, or reviewing code in cmd/, pkg/, test/,
+  charts/, deploy/ or the Dockerfile so the implementation stays aligned with
+  the design docs. Also use when adding a new component, RPC, or backend.
 ---
 
 # CSI Design Docs
 
-This skill keeps the design documents in `design/` in sync with the code in
-`cmd/`, `pkg/`, and `test/`, so the implementation never drifts from the
-intended design.
+This skill keeps a small set of overview docs in `design/` in sync with the
+code. The docs explain how the system fits together and how the code flows
+when a volume is created, attached and removed — not one file per package.
 
-## Design doc map
+## The docs
 
-| Code area | Design doc |
-| --------- | ---------- |
-| `cmd/nvmeof-csi/main.go` | `design/csi-main-design.md` |
-| `pkg/csi/server.go` | `design/csi-server-design.md` |
-| `pkg/csi/controller.go` | `design/csi-controller-design.md` |
-| `pkg/csi/node.go` | `design/csi-node-design.md` |
-| `pkg/csi/identity.go` | `design/csi-identity-design.md` |
-| `pkg/csi/helpers.go` | `design/csi-helpers-design.md` |
-| `pkg/nvmet/*` | `design/csi-nvmet-design.md` |
-| `pkg/zfs/*` | `design/csi-zfs-design.md` |
-| `pkg/node/*` | `design/csi-nvme-design.md` |
-| `pkg/ids/*` | `design/csi-ids-design.md` |
-| `test/manual/e2e.sh` | `design/csi-e2e-design.md` |
-| container image (`Dockerfile`, build workflow) | `design/csi-container-design.md` |
-| systemd controller service (`deploy/systemd/*`) | `design/csi-systemd-design.md` |
-| incident analysis: >4 MiB write rejection | `design/incident-nvmet-tcp-4mib-write-rejection.md` |
-| cross-cutting / whole driver | `design/csi-driver-design.md` |
+| Doc | Owns |
+| --- | ---- |
+| `design/architecture.md` | components and topology, process startup, services per mode, request validation, naming from the volume ID |
+| `design/volume-lifecycle.md` | create → stage → publish → unpublish → unstage → delete, step by step; idempotency and failure handling; reconcile; other controller RPCs; manual e2e |
+| `design/deployment.md` | build, container image, CI, Helm chart, systemd controller service |
+| `design/incident-*.md` | one per incident analysis; never merged into the others |
+
+## Code area → section
+
+| Code area | Doc § section |
+| --------- | ------------- |
+| `cmd/nvmeof-csi/main.go` (flags, startup, shutdown) | architecture § Process startup |
+| `pkg/csi/server.go` (driver, `Run`, `EnsurePort`) | architecture § Process startup, § Services per mode |
+| `pkg/csi/server.go` (`Reconcile`) | volume-lifecycle § Recovery |
+| `pkg/csi/identity.go` | architecture § Services per mode |
+| `pkg/csi/helpers.go` | architecture § Services per mode (request validation) |
+| `pkg/ids/*` | architecture § Naming |
+| `pkg/csi/controller.go`, `pkg/zfs/*`, `pkg/nvmet/*` | volume-lifecycle § Create, § Teardown, § Other controller RPCs |
+| `pkg/csi/node.go`, `pkg/node/*` | volume-lifecycle § Stage and publish, § Teardown |
+| `test/manual/e2e.sh` | volume-lifecycle § Manual end-to-end check |
+| `Dockerfile`, `.github/workflows/*` | deployment § Container image |
+| `charts/nvmeof-csi/*` | deployment § Helm chart |
+| `deploy/systemd/*` | deployment § Controller as a systemd service |
 
 ## Workflow
 
-1. **Locate** the design doc(s) for the code you are about to touch.
-2. **Read** them before editing.
-3. **Edit** the code.
-4. **Update** the design doc in the same change:
-   - behavior, flow, or sequence changed → update the mermaid diagram / steps
-   - flags, RPC surface, or options changed → update the doc
-   - a design decision changed → update the doc (and surface it to the user)
-5. **Create** a design doc if none exists for a newly added component/RPC, using
-   the existing format (Purpose → details → mermaid → notes).
+1. **Locate** the section that owns the code you are about to touch (table
+   above) and read it.
+2. **Edit** the code.
+3. **Update** that section in the same change:
+   - a flow or step order changed → update the diagram and its table
+   - flags, RPC surface, settings changed → update the table row
+   - a design decision changed → update the doc and surface it to the user
+4. **New code goes into an existing doc.** A new package, RPC or backend gets
+   a section (or a row) in the doc that owns its flow. Create a new doc only
+   for a genuinely new cross-cutting topic or an incident analysis, and ask
+   the user first.
 
-## Design doc format
+## Doc format
 
-- Title: `Design: <thing>`
-- `## Purpose`
-- Body sections with detail
-- One or more mermaid diagrams for flows / lifecycles / sequences
-- `## Design notes` / observations where relevant
+- Title `Design: <topic>`, then `## Purpose` (2–4 sentences, what this doc
+  covers and which doc covers the rest).
+- Lead with how things flow: a minimal mermaid diagram per flow.
+  - Box labels 2–4 words, edge labels short verbs; no paths, flags or
+    function names in the boxes.
+  - Flowcharts for overviews; sequence diagrams for RPC-by-RPC flows.
+- Directly below each diagram, a table mapping each box/step to the exact
+  names: RPCs, functions, paths, flags, settings, error codes.
+- `## Design notes` for the *why*: decisions, trade-offs, known gaps.
 
 ## Rules
 
-- Never implement code that contradicts an existing design doc without updating
-  the design doc in the same change. Design leads; code follows.
-- Mermaid diagrams are required for any flow, lifecycle, or sequence described
-  in a design doc.
-- Design docs describe *why / what the design is*; code describes *how*.
-  Keep the split clean — don't turn design docs into code dumps.
-- Stay surgical: update only the design docs for components you actually
-  touched. Do not rewrite unrelated docs as a drive-by.
+- Few docs, high level. Do not create a doc per file or package; extend the
+  owning section instead.
+- Design leads, code follows: never ship code that contradicts a doc without
+  updating the doc in the same change.
+- Every flow, lifecycle or sequence that a doc describes has a diagram.
+- Docs explain what happens and why; the code explains how. No code dumps.
+- Stay surgical: update only the sections for code you touched.
 
-## Pre-change checklist
+## Checklists
 
-- [ ] Design doc for the target component identified and read
-- [ ] Design decision confirmed (or deviation consciously approved)
+Before:
 
-## Post-change checklist
+- [ ] Owning section identified and read
+- [ ] Design decision confirmed (or deviation approved by the user)
 
-- [ ] Design doc updated if behavior/flags/RPCs/design changed
-- [ ] Mermaid diagrams still accurate
-- [ ] No stale statements remain in docs
-- [ ] Present the design-doc delta alongside the code change
+After:
+
+- [ ] Section updated if behavior, flags, RPCs or design changed
+- [ ] Diagrams and their tables still match the code
+- [ ] No stale statements or references to removed docs
+- [ ] Design-doc delta presented alongside the code change

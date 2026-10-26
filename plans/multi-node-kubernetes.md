@@ -10,9 +10,9 @@ across multiple Kubernetes nodes while keeping the supported access mode at
 
 - The driver already supports a mode split (`all|controller|node`) so a
   controller-side process and per-host node processes can exist separately
-  (`cmd/nvmeof-csi/main.go`, `design/csi-main-design.md`, `design/csi-server-design.md`).
+  (`cmd/nvmeof-csi/main.go`, `design/architecture.md`).
 - With `SINGLE_NODE_WRITER` chosen (see `pkg/csi/helpers.go`,
-  `design/csi-helpers-design.md`), multi-node *volume sharing* is out of
+  `design/architecture.md`), multi-node *volume sharing* is out of
   scope; the remaining work is making the driver usable when initiator pods
   run on multiple K8s nodes.
 
@@ -20,8 +20,8 @@ across multiple Kubernetes nodes while keeping the supported access mode at
 
 1. **Identity capability advertisement**
    - Gap: `pkg/csi/identity.go` `GetPluginCapabilities` advertises only
-     `CONTROLLER_SERVICE`, although the design docs (`design/csi-identity-design.md`,
-     registration matrix in `design/csi-server-design.md`) intend node services
+     `CONTROLLER_SERVICE`, although the design docs (`design/architecture.md`,
+     services-per-mode matrix) intend node services
      to be advertised in `all`/`node` modes.
    - Work: advertise the node service capability (RPC stage/unstage; publish/unpublish
      implemented but not yet advertised) alongside the controller capability.
@@ -49,8 +49,7 @@ across multiple Kubernetes nodes while keeping the supported access mode at
 ## Proposed implementation steps
 
 1. Update `GetPluginCapabilities` in `pkg/csi/identity.go` to advertise node
-   service capabilities; sync design docs (`design/csi-identity-design.md`,
-   `design/csi-server-design.md`) in the same change.
+   service capabilities; sync `design/architecture.md` in the same change.
 2. Add node ID override (`--node-id` flag or downward-API sourced value) and wire
    it through `cmd/nvmeof-csi/main.go` into `csi.Config.NodeID`.
 3. Add Kubernetes deployment manifests under `deploy/` (controller + node +
