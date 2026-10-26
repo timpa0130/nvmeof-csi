@@ -14,6 +14,27 @@ That's the gap I kept running into in my homelab with virtual Kubernetes cluster
 
 It uses my Proxmox ZFS pool directly (no duplicated storage) and mounts the volume over the network via NVMe-oF/TCP, so different worker nodes can use the same volume — which makes maintenance scenarios (drain, node replacement) painless.
 
+```mermaid
+flowchart LR
+    subgraph PROXMO["Proxmox Host"]
+        cctrl["CSI Controller<br/>(provision)"]
+        tgt["NVMe-oF/TCP Target<br/>:4420"]
+        subsys["NVMe Subsystem<br/>nsid 1"]
+        pool["ZFS Pool<br/>(zvol per volume)"]
+    end
+
+    subgraph K8S["Virtual Kubernetes Cluster"]
+        wk["Worker Node(s)<br/>NVMe initiator"]
+        pod["Pod<br/>(volume)"]
+    end
+
+    cctrl -->|"provision"| tgt
+    tgt -->|"namespace + subsystem"| subsys
+    subsys -->|"backed by zvol"| pool
+    wk -->|"NVMe-oF/TCP over network"| tgt
+    pod -->|"csi stage + publish"| wk
+```
+
 ## Design
 - One zvol + one NVMe subsystem per volume (nsid 1)
 - Everything derived from volumeID — no metadata store
