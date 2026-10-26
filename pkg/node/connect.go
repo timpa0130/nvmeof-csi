@@ -5,7 +5,9 @@ package node
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -17,6 +19,39 @@ const deviceWaitTimeout = 10 * time.Second
 // nsid of every subsystem's namespace. v1 exposes exactly one namespace
 // per subsystem, always with nsid 1.
 const nsid = 1
+
+// CapMaxSectors caps the block device's maximum I/O size at 1 MB, which
+// is one SGL segment (256 × 4K descriptors). The target advertises
+// mdts=0 (unlimited), so the initiator otherwise merges writeback into
+// multi-MB I/Os whose chained SGLs the target rejects with "SGL Invalid
+// Data Offset" — breaking mkfs, fsync and any large buffered write.
+func CapMaxSectors(dev string) error {
+	return capMaxSectors("/sys/block", dev)
+}
+
+func capMaxSectors(sysfsBlock, dev string) error {
+	name := strings.TrimPrefix(dev, "/dev/")
+	path := sysfsBlock + "/" + name + "/queue/max_sectors_kb"
+	cur, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			// No sysfs entry (tests, unexpected device shape): nothing
+			// to cap.
+			return nil
+		}
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	if strings.TrimSpace(string(cur)) == maxSectorsKB {
+		return nil
+	}
+	if err := os.WriteFile(path, []byte(maxSectorsKB), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
+}
+
+// maxSectorsKB is the device max I/O size cap in KB (see CapMaxSectors).
+const maxSectorsKB = "1024"
 
 // Connect establishes an NVMe-oF/TCP connection to the subsystem nqn at
 // traddr:trsvcid and waits for the controller device to appear.
