@@ -1,15 +1,13 @@
 name: e2e
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - pkg/**
-      - cmd/**
-      - test/manual/e2e.sh
-      - .github/**
   pull_request:
     branches: [main]
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
     paths:
       - pkg/**
       - cmd/**
@@ -20,6 +18,8 @@ jobs:
   e2e:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    # Only run for non-draft pull requests.
+    if: github.event.pull_request.draft == false
 
     steps:
       - uses: actions/checkout@v4
