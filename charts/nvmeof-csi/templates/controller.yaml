@@ -25,6 +25,9 @@ spec:
           args:
             - --mode={{ .Values.controller.mode }}
             - --socket=/run/csi/nvmeof-csi.sock
+            {{- if .Values.controller.listen }}
+            - --listen={{ .Values.controller.listen }}
+            {{- end }}
             - --target-addr={{ .Values.controller.targetAddr }}
             - --port={{ .Values.controller.port }}
             - --pool={{ .Values.controller.pool }}
