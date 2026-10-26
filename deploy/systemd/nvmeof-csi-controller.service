@@ -1,0 +1,48 @@
+# nvmeof-csi in controller mode on the NVMe-oF target host (outside Kubernetes).
+# See design/csi-systemd-design.md.
+
+[Unit]
+Description=nvmeof-csi controller (ZFS zvols + nvmet NVMe-oF/TCP target)
+Documentation=https://github.com/timpa0130/nvmeof-csi
+# --listen and --target-addr bind/advertise a host IP.
+Wants=network-online.target
+After=network-online.target
+# Pool imported and /dev/zvol links present before Reconcile re-exports zvols.
+Wants=zfs.target
+After=zfs.target zfs-import.target zfs-volumes.target
+# nvmet lives in configfs; modules loaded before EnsurePort.
+Requires=sys-kernel-config.mount
+After=sys-kernel-config.mount systemd-modules-load.service
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/default/nvmeof-csi-controller
+# '+' runs modprobe with full privileges, outside the capability set below.
+ExecStartPre=+/sbin/modprobe -a nvmet nvmet_tcp
+ExecStart=/usr/local/bin/nvmeof-csi \
+    --mode=controller \
+    --socket=/run/csi/nvmeof-csi.sock \
+    --listen=${NVMEOF_CSI_LISTEN} \
+    --target-addr=${NVMEOF_CSI_TARGET_ADDR} \
+    --port=${NVMEOF_CSI_PORT} \
+    --pool=${NVMEOF_CSI_POOL}
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+
+# Local unix socket dir (/run/csi), removed on stop.
+RuntimeDirectory=csi
+RuntimeDirectoryMode=0755
+
+# Privileges: root for configfs (/sys/kernel/config/nvmet, root-owned) and
+# CAP_SYS_ADMIN for zfs/zpool ioctls on /dev/zfs.
+User=root
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_DAC_OVERRIDE
+NoNewPrivileges=yes
+# /sys and /dev must stay writable: no ProtectKernelTunables, PrivateDevices.
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
