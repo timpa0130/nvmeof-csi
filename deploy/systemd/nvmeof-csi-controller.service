@@ -1,5 +1,5 @@
 # nvmeof-csi in controller mode on the NVMe-oF target host (outside Kubernetes).
-# See design/csi-systemd-design.md.
+# See design/deployment.md.
 
 [Unit]
 Description=nvmeof-csi controller (ZFS zvols + nvmet NVMe-oF/TCP target)
