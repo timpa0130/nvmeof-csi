@@ -2,9 +2,9 @@
 replicaCount: 1
 
 image:
-  repository: timpa0130/nvmeof-csi
+  repository: ghcr.io/timpa0130/nvmeof-csi
   tag: latest
-  pullPolicy: IfNotPresent
+  pullPolicy: Always
 
 csi:
   # CSI plugin name advertised by the driver.
