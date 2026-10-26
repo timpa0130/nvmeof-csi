@@ -7,9 +7,11 @@ in Kubernetes via the Helm chart (`charts/nvmeof-csi`).
 
 ## Components
 
-- `Dockerfile` — runtime image: `alpine:3.20` + the statically linked
+- `Dockerfile` — runtime image: `alpine` base + the statically linked
   `bin/nvmeof-csi` Go binary (built via
-  `CGO_ENABLED=0 go build -o bin/nvmeof-csi ./cmd/nvmeof-csi`).
+  `CGO_ENABLED=0 go build -o bin/nvmeof-csi ./cmd/nvmeof-csi`), plus the
+  runtime userspace packages `nvme-cli` (initiator connect/list) and
+  `e2fsprogs` (`mkfs.ext4` + `blkid` for filesystem-mode staging).
 - `.github/workflows/build.yml` — CI workflow: builds the Go binary, then the
   container image; publishes to `ghcr.io/timpa0130/nvmeof-csi` on push to main.
 
@@ -18,7 +20,7 @@ in Kubernetes via the Helm chart (`charts/nvmeof-csi`).
 ```mermaid
 flowchart LR
     SRC["Source: cmd/nvmeof-csi"] --> BIN["CGO_ENABLED=0 go build -o bin/nvmeof-csi ./cmd/nvmeof-csi"]
-    BIN --> IMG["Dockerfile<br/>alpine + nvmeof-csi"]
+    BIN --> IMG["Dockerfile<br/>alpine + nvmeof-csi + nvme-cli + e2fsprogs"]
     IMG --> REG["ghcr.io/timpa0130/nvmeof-csi"]
 ```
 
@@ -40,7 +42,10 @@ flowchart LR
 ## Design notes
 
 - Go binary is statically linked (no CGO) → `alpine` base is sufficient runtime.
-- No userspace packages required beyond the base image.
+- Userspace packages are limited to what the driver execs at runtime:
+  `nvme` (connect/list/disconnect) and `mkfs.*`/`blkid` (filesystem staging).
+  ZFS tools are only needed by controller mode, which runs on the external
+  storage node, not in this image.
 
 ## Open questions
 

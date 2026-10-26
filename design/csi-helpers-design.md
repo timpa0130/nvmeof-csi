@@ -14,11 +14,10 @@ missing.
 Enforces v1 scope:
 
 - at least one capability required
-- `mount` mode → rejected (block-only)
-- block mode required
+- `mount` (filesystem) or `block` access type required
 - access mode must be `SINGLE_NODE_WRITER`
 
 ## Design notes
 
-Single choke point for access-mode policy — keeps the "block +
-SINGLE_NODE_WRITER only" contract in one place.
+Single choke point for access-mode policy — keeps the "block or filesystem
++ `SINGLE_NODE_WRITER` only" contract in one place.

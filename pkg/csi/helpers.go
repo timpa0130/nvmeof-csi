@@ -18,8 +18,8 @@ func requireVolumeID(req interface{ GetVolumeId() string }) (string, error) {
 	return id, nil
 }
 
-// validateCapabilities enforces v1 scope: block access only, single node
-// writer access mode only.
+// validateCapabilities enforces v1 scope: block or filesystem (mount)
+// access, single node writer access mode only.
 func validateCapabilities(caps []*csi.VolumeCapability) error {
 	if len(caps) == 0 {
 		return status.Error(codes.InvalidArgument, "volume capabilities are required")
@@ -28,11 +28,8 @@ func validateCapabilities(caps []*csi.VolumeCapability) error {
 		if c == nil {
 			return status.Error(codes.InvalidArgument, "nil volume capability")
 		}
-		if c.GetMount() != nil {
-			return status.Error(codes.InvalidArgument, "filesystem (mount) mode is not supported; block mode only")
-		}
-		if c.GetBlock() == nil {
-			return status.Error(codes.InvalidArgument, "volume capability must specify block access")
+		if c.GetMount() == nil && c.GetBlock() == nil {
+			return status.Error(codes.InvalidArgument, "volume capability must specify block or filesystem access")
 		}
 		mode := c.GetAccessMode().GetMode()
 		if mode != csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER {

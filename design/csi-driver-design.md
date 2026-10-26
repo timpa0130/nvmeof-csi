@@ -27,7 +27,9 @@ binary, selectable via `--mode all|controller|node`.
 - Backend storage: **ZFS** zvol (`zfs create -V <bytes> -o volblocksize=16K`).
 - NVMe-oF/TCP transport: **kernel nvmet** (configfs) + `nvme` CLI
   (`nvme connect -t tcp -n <nqn> -a <addr> -s <trsvcid>`).
-- Semantics: **block mode only**, `SINGLE_NODE_WRITER`, no filesystem layer.
+- Semantics: `SINGLE_NODE_WRITER`; **block mode** (raw device) and
+  **filesystem mode** (`fsType` created on the block device at stage time).
+  No snapshot/clone/expand layer.
 
 ## 3. External counterparts
 
@@ -130,7 +132,9 @@ sequenceDiagram
 
 - Controller provisions the zvol on the backend (ZFS) and exposes it as an
   NVMe-oF/TCP subsystem/Namespace/Port.
-- Node driver attaches the initiator over TCP and bind-mounts the block device.
+- Node driver attaches the initiator over TCP; block volumes are bind-mounted
+  as the raw device, filesystem volumes are `mkfs`'d (if needed) and mounted
+  at stage time, then bind-mounted into the pod.
 - The controller never needs to "know" about the node's local disks; the node
   handles the local attach.
 
