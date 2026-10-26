@@ -2,6 +2,18 @@
 
 NVMe-oF/TCP CSI driver. Block mode. Stateless. Tested with csc (no Kubernetes).
 
+## Who is this for
+
+Homelab Kubernetes clusters that need real block storage, but don't want to run a heavyweight operator stack just to get it.
+
+- **Rook** is great in every other aspect, but the resource footprint is too much for a homelab.
+- **Rancher Longhorn** is not for me — it uses NFS under the hood and is about as heavy as Rook, but less feature-rich.
+- **local-path-provisioner** is great, but the data only lives on a single node — lose that node, lose the data.
+
+That's the gap I kept running into in my homelab with virtual Kubernetes clusters, so I built this.
+
+It uses my Proxmox ZFS pool directly (no duplicated storage) and mounts the volume over the network via NVMe-oF/TCP, so different worker nodes can use the same volume — which makes maintenance scenarios (drain, node replacement) painless.
+
 ## Design
 - One zvol + one NVMe subsystem per volume (nsid 1)
 - Everything derived from volumeID — no metadata store
