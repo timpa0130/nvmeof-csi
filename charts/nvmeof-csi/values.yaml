@@ -19,7 +19,7 @@ controller:
   mode: controller
   # Address initiators (K8s nodes / pods) connect to — the NVMe-oF/TCP
   # backend host. May point at a single external storage node.
-  targetAddr: 192.168.1.207
+  targetAddr: 192.168.1.107
   port: "4420"
   pool: nvme
 
@@ -27,6 +27,6 @@ node:
   enabled: true
   mode: node
   # NVMe-oF/TCP backend the node initiates to.
-  targetAddr: 192.168.1.207
+  targetAddr: 192.168.1.107
   port: "4420"
   pool: nvme
