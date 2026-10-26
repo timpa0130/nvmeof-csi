@@ -1,0 +1,9 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ .Values.storageClass.name }}
+# Must equal the driver's GetPluginInfo name — external-provisioner claims
+# PVCs of classes whose provisioner matches the driver it connects to.
+provisioner: {{ .Values.csi.pluginName }}
+reclaimPolicy: Delete
+volumeBindingMode: Immediate

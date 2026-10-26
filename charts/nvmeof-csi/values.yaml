@@ -7,16 +7,21 @@ image:
   pullPolicy: Always
 
 csi:
-  # CSI plugin name advertised by the driver.
+  # CSI plugin name advertised by the driver; also the CSIDriver name,
+  # the StorageClass provisioner, and the kubelet plugin dir name.
   pluginName: com.timpa0130.nvmeof-csi
-  # Name of the CSIDriver custom resource.
-  csiDriverName: nvmeof-csi
   pluginVersion: "1.0.0"
+
+storageClass:
+  name: nvmeof-csi
 
 controller:
   enabled: false
   replicaCount: 1
   mode: controller
+  # Optional TCP address to also serve the CSI gRPC API on, for sidecars
+  # (e.g. external-provisioner) running on other hosts. Empty = disabled.
+  listen: ""
   # Address initiators (K8s nodes / pods) connect to — the NVMe-oF/TCP
   # backend host. May point at a single external storage node.
   targetAddr: 192.168.1.107

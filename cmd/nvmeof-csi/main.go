@@ -17,6 +17,7 @@ import (
 func main() {
 	var (
 		socket     = flag.String("socket", "/run/csi/nvmeof-csi.sock", "Unix socket path for the CSI gRPC endpoint")
+		listen     = flag.String("listen", "", "optional TCP address (host:port) to also serve gRPC on, for remote sidecars")
 		targetAddr = flag.String("target-addr", "", "IP address initiators connect to (default: first non-loopback IPv4)")
 		port       = flag.String("port", csi.DefaultPort, "NVMe-oF/TCP port (trsvcid)")
 		pool       = flag.String("pool", "nvme", "ZFS pool for zvols")
@@ -44,6 +45,7 @@ func main() {
 
 	driver, err := csi.NewDriver(csi.Config{
 		SocketPath: *socket,
+		Listen:     *listen,
 		TargetAddr: *targetAddr,
 		Port:       *port,
 		Pool:       *pool,

@@ -22,10 +22,11 @@ spec:
           image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
-            privileged: true # nvmet configfs + /dev/nvme* access
+            privileged: true # /dev, mount propagation, nvme CLI
           args:
             - --mode={{ .Values.node.mode }}
-            - --socket=/run/csi/nvmeof-csi.sock
+            # Socket must live on the host where kubelet can dial it.
+            - --socket=/var/lib/kubelet/plugins/{{ .Values.csi.pluginName }}/csi.sock
             - --target-addr={{ .Values.node.targetAddr }}
             - --port={{ .Values.node.port }}
             - --pool={{ .Values.node.pool }}
@@ -36,13 +37,44 @@ spec:
                 fieldRef:
                   fieldPath: spec.nodeName
           volumeMounts:
-            - name: csi-socket
-              mountPath: /run/csi
+            - name: socket-dir
+              mountPath: /var/lib/kubelet/plugins/{{ .Values.csi.pluginName }}
+            # Bidirectional propagation makes mounts the driver creates
+            # (staging, publish) visible to kubelet and pods.
+            - name: kubelet-dir
+              mountPath: /var/lib/kubelet
+              mountPropagation: Bidirectional
+            - name: dev
+              mountPath: /dev
             - name: nvmet-config
               mountPath: /sys/kernel/config
+        - name: node-driver-registrar
+          image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.13.0
+          args:
+            - --csi-address=/var/lib/kubelet/plugins/{{ .Values.csi.pluginName }}/csi.sock
+            - --kubelet-registration-path=/var/lib/kubelet/plugins/{{ .Values.csi.pluginName }}/csi.sock
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /var/lib/kubelet/plugins/{{ .Values.csi.pluginName }}
+            - name: registration-dir
+              mountPath: /registration
       volumes:
-        - name: csi-socket
-          emptyDir: {}
+        - name: socket-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins/{{ .Values.csi.pluginName }}
+            type: DirectoryOrCreate
+        - name: registration-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins_registry
+            type: DirectoryOrCreate
+        - name: kubelet-dir
+          hostPath:
+            path: /var/lib/kubelet
+            type: Directory
+        - name: dev
+          hostPath:
+            path: /dev
+            type: Directory
         - name: nvmet-config
           hostPath:
             path: /sys/kernel/config

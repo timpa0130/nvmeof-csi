@@ -9,7 +9,7 @@ behavior, and shutdown.
 
 ```mermaid
 flowchart TD
-    START["nvmeof-csi (linux)<br/>os.Args"] --> PARSE["flag.Parse<br/>--socket --target-addr --port --pool --mode --node-id"]
+    START["nvmeof-csi (linux)<br/>os.Args"] --> PARSE["flag.Parse<br/>--socket --listen --target-addr --port --pool --mode --node-id"]
     PARSE --> TADDR{"--target-addr empty?"}
     TADDR -->|"yes"| AUTO["defaultIPv4()<br/>first non-loopback IPv4"]
     TADDR -->|"no"| USE["use flag value"]
@@ -23,12 +23,14 @@ flowchart TD
     NEW --> MODE{"mode == node?"}
     MODE -->|"yes"| SKIP["skip EnsurePort / Reconcile"]
     MODE -->|"no"| RUN["driver.EnsurePort()<br/>driver.Reconcile()"]
-    RUN --> LISTEN["driver.Run():<br/>unix socket, register, serve"]
+    RUN --> LISTEN["driver.Run():<br/>unix socket (+ optional TCP via --listen),<br/>register, serve"]
 ```
 
 ## Flags
 
 - `--socket` default `/run/csi/nvmeof-csi.sock`
+- `--listen` default `""` (disabled); optional TCP `host:port` to also serve
+  the CSI gRPC API on, for sidecars on other hosts
 - `--target-addr` default `""` → auto-detect via `defaultIPv4()` (first
   non-loopback IPv4)
 - `--port` default `csi.DefaultPort` (`4420`)
