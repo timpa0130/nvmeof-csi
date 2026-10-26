@@ -14,7 +14,7 @@ csi:
   pluginVersion: "1.0.0"
 
 controller:
-  enabled: true
+  enabled: false
   replicaCount: 1
   mode: controller
   # Address initiators (K8s nodes / pods) connect to — the NVMe-oF/TCP

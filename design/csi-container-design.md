@@ -9,7 +9,7 @@ in Kubernetes via the Helm chart (`charts/nvmeof-csi`).
 
 - `Dockerfile` — runtime image: `alpine:3.20` + the statically linked
   `bin/nvmeof-csi` Go binary (built via
-  `go build -o bin/nvmeof-csi ./cmd/nvmeof-csi`).
+  `CGO_ENABLED=0 go build -o bin/nvmeof-csi ./cmd/nvmeof-csi`).
 - `.github/workflows/build.yml` — CI workflow: builds the Go binary, then the
   container image; publishes to `ghcr.io/timpa0130/nvmeof-csi` on push to main.
 
@@ -17,7 +17,7 @@ in Kubernetes via the Helm chart (`charts/nvmeof-csi`).
 
 ```mermaid
 flowchart LR
-    SRC["Source: cmd/nvmeof-csi"] --> BIN["go build -o bin/nvmeof-csi ./cmd/nvmeof-csi"]
+    SRC["Source: cmd/nvmeof-csi"] --> BIN["CGO_ENABLED=0 go build -o bin/nvmeof-csi ./cmd/nvmeof-csi"]
     BIN --> IMG["Dockerfile<br/>alpine + nvmeof-csi"]
     IMG --> REG["ghcr.io/timpa0130/nvmeof-csi"]
 ```
