@@ -12,7 +12,6 @@ on:
       - pkg/**
       - cmd/**
       - test/manual/e2e.sh
-      - .github/**
 
 jobs:
   e2e:
