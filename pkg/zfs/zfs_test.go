@@ -18,6 +18,37 @@ func TestExistsFalseForBogus(t *testing.T) {
 	}
 }
 
+func TestHolderRoundTrip(t *testing.T) {
+	z := New("nvme")
+	dataset := "nvme/zfs-test/holder"
+	if err := z.CreateVolume(dataset, 1<<20); err != nil {
+		t.Fatalf("CreateVolume: %v", err)
+	}
+	t.Cleanup(func() { _ = z.DestroyVolume(dataset) })
+
+	want := func(expected string) {
+		t.Helper()
+		got, err := z.Holder(dataset)
+		if err != nil {
+			t.Fatalf("Holder: %v", err)
+		}
+		if got != expected {
+			t.Fatalf("Holder = %q, want %q", got, expected)
+		}
+	}
+	want("")
+	if err := z.SetHolder(dataset, "node-1"); err != nil {
+		t.Fatalf("SetHolder: %v", err)
+	}
+	want("node-1")
+	for i := 0; i < 2; i++ {
+		if err := z.ClearHolder(dataset); err != nil {
+			t.Fatalf("ClearHolder: %v", err)
+		}
+	}
+	want("")
+}
+
 func TestFreeBytesParses(t *testing.T) {
 	z := New("nvme")
 	free, err := z.FreeBytes()

@@ -127,3 +127,23 @@ func TestDataset(t *testing.T) {
 		t.Fatalf("Dataset with empty ns = %q", d)
 	}
 }
+
+func TestParseDataset(t *testing.T) {
+	if id, ok := ParseDataset("nvme", Dataset("nvme", "ns1", "pvc.1")); !ok || id != "ns1/pvc.1" {
+		t.Fatalf("ParseDataset = %q, %v", id, ok)
+	}
+	for _, foreign := range []string{"nvme/swap", "nvme/a/b/c", "nvme/a.b/c", "nvme/a/", "nvme//c", "other/a/b", "nvme-2/a/b"} {
+		if id, ok := ParseDataset("nvme", foreign); ok {
+			t.Fatalf("ParseDataset(%q) = %q, want not ours", foreign, id)
+		}
+	}
+}
+
+func TestParseHostNQN(t *testing.T) {
+	if id, ok := ParseHostNQN(HostNQN("node.a:1")); !ok || id != "node.a:1" {
+		t.Fatalf("ParseHostNQN = %q, %v", id, ok)
+	}
+	if id, ok := ParseHostNQN(NQN("default/a")); ok {
+		t.Fatalf("ParseHostNQN on a volume NQN = %q", id)
+	}
+}

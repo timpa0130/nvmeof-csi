@@ -113,7 +113,7 @@ func (t *Target) GrantHost(nqn, hostNQN string) error {
 		}
 		return fmt.Errorf("stat subsystem: %w", err)
 	}
-	holders, err := t.allowedHosts(nqn)
+	holders, err := t.AllowedHosts(nqn)
 	if err != nil {
 		return err
 	}
@@ -155,7 +155,7 @@ func (t *Target) RevokeHost(nqn, hostNQN string) error {
 	if _, err := os.Stat(subDir); errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
-	holders, err := t.allowedHosts(nqn)
+	holders, err := t.AllowedHosts(nqn)
 	if err != nil {
 		return err
 	}
@@ -173,9 +173,9 @@ func (t *Target) RevokeHost(nqn, hostNQN string) error {
 	return t.LinkSubsystemToPort(nqn)
 }
 
-// allowedHosts lists the host NQNs linked under the subsystem's
-// allowed_hosts group.
-func (t *Target) allowedHosts(nqn string) ([]string, error) {
+// AllowedHosts lists the host NQNs linked under the subsystem's
+// allowed_hosts group. A missing subsystem has none.
+func (t *Target) AllowedHosts(nqn string) ([]string, error) {
 	entries, err := os.ReadDir(filepath.Join(t.root, "subsystems", nqn, "allowed_hosts"))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -190,17 +190,42 @@ func (t *Target) allowedHosts(nqn string) ([]string, error) {
 	return out, nil
 }
 
+// ExportVolume builds the volume's single-namespace export on the shared
+// port. Idempotent and safe on a live export: it completes whatever is
+// missing, such as after a reboot emptied configfs, and keeps connections
+// and grants.
+func (t *Target) ExportVolume(nqn, devicePath string) error {
+	if err := t.PrepareVolume(nqn, devicePath); err != nil {
+		return err
+	}
+	return t.LinkSubsystemToPort(nqn)
+}
+
+// PrepareVolume is ExportVolume without the port link, so that grants can be
+// in place before any host can reach the subsystem. Idempotent.
+func (t *Target) PrepareVolume(nqn, devicePath string) error {
+	if err := t.CreateSubsystem(nqn); err != nil {
+		return err
+	}
+	return t.CreateNamespace(nqn, 1, devicePath)
+}
+
 // CreateNamespace creates subsystems/<nqn>/namespaces/<nsid>, points it
-// at devicePath and enables it. Idempotent.
+// at devicePath and enables it. Idempotent: an enabled namespace is left
+// alone, since configfs refuses device_path writes while it is enabled.
 func (t *Target) CreateNamespace(nqn string, nsid int32, devicePath string) error {
 	nsDir := filepath.Join(t.root, "subsystems", nqn, "namespaces", fmt.Sprintf("%d", nsid))
 	if err := os.MkdirAll(nsDir, 0o755); err != nil {
 		return fmt.Errorf("mkdir namespace: %w", err)
 	}
+	enable := filepath.Join(nsDir, "enable")
+	if cur, err := os.ReadFile(enable); err == nil && strings.TrimSpace(string(cur)) == "1" {
+		return nil
+	}
 	if err := writeFile(filepath.Join(nsDir, "device_path"), devicePath+"\n"); err != nil {
 		return fmt.Errorf("write device_path: %w", err)
 	}
-	if err := writeFile(filepath.Join(nsDir, "enable"), "1\n"); err != nil {
+	if err := writeFile(enable, "1\n"); err != nil {
 		return fmt.Errorf("write enable: %w", err)
 	}
 	return nil

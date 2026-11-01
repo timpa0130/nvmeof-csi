@@ -24,7 +24,7 @@ flowchart LR
 | Box | RPC | Runs on | Touches |
 | --- | --- | --- | --- |
 | Create volume | `CreateVolume` | controller | `zfs create`, nvmet subsystem / namespace / port link |
-| Grant node | `ControllerPublishVolume` | controller | nvmet `allowed_hosts` link for the node's host NQN |
+| Grant node | `ControllerPublishVolume` | controller | nvmet `allowed_hosts` link for the node's host NQN, holder property on the zvol |
 | Stage on node | `NodeStageVolume` | node | `nvme connect`, sysfs I/O cap, `mkfs` + mount (filesystem mode) |
 | Publish to pod | `NodePublishVolume` | node | bind mount into the pod's target path |
 | Unpublish | `NodeUnpublishVolume` | node | unmount target |
@@ -48,6 +48,7 @@ sequenceDiagram
     C->>C: validate, derive names
     C->>Z: zvol exists?
     alt exists, same size
+        C->>T: complete export
         C-->>EP: existing volume
     else new
         C->>Z: create zvol
@@ -61,8 +62,9 @@ sequenceDiagram
 | validate | `validateCapabilities`; namespace/name from `csi.storage.k8s.io/pvc/namespace` / `pvc/name`, else `req.GetName()`; `ValidNamespace`/`ValidName`; `MaxNQN`, `MaxDataset` → `InvalidArgument` |
 | derive names | volume ID, NQN, dataset (`pkg/ids`) |
 | zvol exists? | same `volsize` → return it (idempotent); different size → `AlreadyExists` |
+| complete export | `exportVolume`, for a retry after an earlier attempt stopped short; failure → `Internal`, the zvol is kept |
 | create zvol | parents with `mountpoint=none`, then `zfs create -V <bytes> -o volblocksize=16K <dataset>`; waits for `/dev/zvol/<dataset>` (udev) |
-| subsystem, namespace, port link | `CreateSubsystem(nqn)` with `attr_allow_any_host=0`, so no host can connect yet; `CreateNamespace(nqn, 1, /dev/zvol/...)`, `LinkSubsystemToPort(nqn)` on port `1` |
+| subsystem, namespace, port link | `exportVolume` → `ExportVolume(nqn, /dev/zvol/...)`: `CreateSubsystem(nqn)` with `attr_allow_any_host=0`, so no host can connect yet; `CreateNamespace(nqn, 1, ...)`, which leaves an enabled namespace alone; `LinkSubsystemToPort(nqn)` on port `1` |
 | on any failure | `TeardownVolume(nqn)` + `DestroyVolume(dataset)`, then `Internal` — no half-built volume is left |
 
 ## 2. Grant, stage and publish
@@ -80,7 +82,8 @@ sequenceDiagram
     participant N as Node
     participant T as nvmet
     A->>C: ControllerPublishVolume
-    C->>T: grant host
+    C->>T: complete export, grant host
+    C->>C: record holder
     C-->>A: attached
     K->>N: NodeStageVolume
     N->>T: nvme connect
@@ -96,7 +99,9 @@ sequenceDiagram
 
 | Step | Detail |
 | --- | --- |
+| complete export | `exportVolume`, retrying a volume `Reconcile` could not export; failure → `Internal` |
 | grant host | `GrantHost(nqn, HostNQN(nodeID))`: `attr_allow_any_host=0`, `hosts/<host>`, `allowed_hosts/<host>` link; same node → success; other node → `FailedPrecondition`; no zvol → `NotFound` |
+| record holder | `zfs set com.timpa0130.nvmeof-csi:holder=<node ID>` on the zvol; failure → `Internal`, and the retry completes it, so `attached` always has a record |
 | nvme connect | `nvme connect -t tcp -n <nqn> -a <target-addr> -s <port> --hostnqn <host> --hostid <id>`; no-op when the namespace already exists; waits up to 10s for it; fails if the node has no grant |
 | find namespace | `LookupNamespace(nqn)`: every `/sys/block/*` whose `device/subsysnqn` equals the NQN. Head = the entry without a `c` segment (`/dev/nvme1n1`); paths = `nvme<s>c<c>n1` |
 | cap I/O | `Namespace.CapIO()` lowers `queue/max_sectors_kb` to `1024` on head **and** paths; runs on every stage (and block publish) before any early return |
@@ -127,6 +132,7 @@ sequenceDiagram
     K->>N: NodeUnstageVolume
     N->>N: unmount staging, disconnect
     A->>C: ControllerUnpublishVolume
+    C->>C: clear holder
     C->>C: drop connections, revoke host
     EP->>C: DeleteVolume
     C->>C: nvmet teardown, destroy zvol
@@ -136,6 +142,7 @@ sequenceDiagram
 | --- | --- |
 | unmount target | tolerates `EINVAL` / `ENOENT` (not mounted) |
 | unmount staging, disconnect | unmount only when mounted (filesystem mode); `nvme disconnect -n <nqn>`; namespace gone → success |
+| clear holder | only if this node is the recorded holder (or no node was named); before the revoke, because no other node can be granted until then, so a retry cannot clear a newer holder's record |
 | drop connections, revoke host | `RevokeHost(nqn, host)`: only if `host` holds it, unlink the port (deletes its controllers) and remove the `allowed_hosts` link; then always restore the port link. Other subsystems are untouched. No subsystem → success |
 | nvmet teardown | `TeardownVolume(nqn)`: unlink port, remove `allowed_hosts` links, remove namespace, remove subsystem |
 | destroy zvol | `zfs destroy <dataset>`; parent datasets left in place; missing volume → success |
@@ -167,23 +174,77 @@ sequenceDiagram
 | Running but partitioned node | as for a dead node; the revoke drops its connection, so its I/O stops reaching the target |
 
 The revoke is the fence: a node cut off from the API server cannot be asked to
-unmount, but the target stops serving it regardless. Its initiator retries and
-is refused. Unflushed writes on a dead or fenced node are lost; the new node
-replays the ext4 journal.
+unmount, but the target stops serving it regardless. Its next reconnect is
+refused with do-not-retry: kernels with upstream commit `adfde7ed0b30` then remove
+the controller, so the node stays out until it stages the volume again, and older
+kernels keep retrying until `ctrl_loss_tmo`. Unflushed writes on a dead or fenced
+node are lost; the new node replays the ext4 journal.
 
 ## Recovery: reconcile on startup
 
-A controller crash between steps can leave a subsystem without its zvol.
-On every controller start, `Reconcile()` lists nvmet subsystems with our NQN
-root and tears down any whose dataset no longer exists. Live exports are
-untouched, so initiators keep their I/O across a controller restart.
+The pool is durable and configfs is not, so on every controller start
+`Reconcile()` makes configfs match the pool, including who holds each volume, so
+a node's first reconnect after a reboot is accepted and its pods keep running.
+
+```mermaid
+sequenceDiagram
+    participant C as Controller
+    participant Z as ZFS
+    participant T as nvmet
+    participant N as Node
+    N->>T: reconnect, port closed
+    C->>T: ensure port
+    C->>T: tear down orphans
+    C->>Z: list zvols, read holders
+    C->>T: rebuild each, grant holder
+    N->>T: reconnect, port closed
+    C->>T: link all to port
+    N->>T: reconnect accepted
+```
+
+| Step | Detail |
+| --- | --- |
+| reconnect, port closed | a port with no subsystem linked does not listen, so TCP connect fails; the initiator retries every `reconnect_delay` (10s) until `ctrl_loss_tmo` (10 minutes) |
+| ensure port | `EnsurePort`, in `main` before `Reconcile` |
+| tear down orphans | subsystems with our NQN root whose dataset no longer exists; `TeardownVolume(nqn)`; failure stops startup |
+| list zvols, read holders | `zfs.Volumes()`; failure stops startup. `ParseDataset` skips any zvol not named `<pool>/<namespace>/<name>`; `zfs get` of the holder property |
+| rebuild each, grant holder | `restoreVolume`: waits up to 5s for `/dev/zvol/<dataset>`, `PrepareVolume`, `GrantHost` when a holder is recorded; failure is logged and the next zvol continues |
+| link all to port | `LinkSubsystemToPort` for every restored volume, as the last step |
+
+Live exports are untouched, so initiators keep their I/O across a controller
+restart: `CreateNamespace` skips an enabled namespace, and links and grants are
+kept.
+
+### Design notes
+
+- Why the holder is stored: a host refused by nvmet gets do-not-retry and removes
+  its controller, and kubelet does not re-stage a running pod. So grants must be
+  back before a host can reach a subsystem, which rules out waiting for the attacher.
+  The cost is a second record of the attachment beside `VolumeAttachment`s.
+- Why links come last and together: the first link opens the shared port, and a
+  host connecting to a subsystem not linked yet is refused the same way. Linking
+  after the slow steps leaves only the time between links.
+- The attacher stays as a fallback: `ListVolumes` reports granted nodes as
+  `published_node_ids`, and `ReconcileVA`, every `--reconcile-sync` (default 1m),
+  publishes a `VolumeAttachment` whose grant is missing. That restores the grant but
+  not a controller already removed: its pods must restart.
+- A bad zvol must not exit the process: that would keep every other volume down.
+  `ControllerPublishVolume` retries its export.
+- Every zvol matching the naming scheme is exported, since the pool is dedicated
+  to the driver.
+- Known gap: a volume `Reconcile` could not restore, or one granted with no record,
+  refuses its node once the port opens, so that node loses its controller.
+- Known gap: if the target stays away longer than `ctrl_loss_tmo`, the node drops
+  the controller and filesystems on it fail; the driver does not recover that.
+- Known gap: a grant or record with no `VolumeAttachment` left is never revoked, and
+  keeps other nodes out of that volume.
 
 ## Other controller RPCs
 
 | RPC | Behavior |
 | --- | --- |
 | `ValidateVolumeCapabilities` | zvol must exist (`NotFound` otherwise), then capability check |
-| `ListVolumes` | `zfs list -t volume`, with `volsize` per dataset |
+| `ListVolumes` | `zfs list -t volume`, with `volsize` and granted nodes per volume; zvols outside the naming scheme are skipped |
 | `GetCapacity` | `zpool list -o free <pool>` |
 
 ## Manual end-to-end check
@@ -191,5 +252,7 @@ untouched, so initiators keep their I/O across a controller restart.
 `test/manual/e2e.sh` walks this whole lifecycle without Kubernetes, as root,
 using `csc` against the driver socket: probe → create → stage refused → grant →
 second node refused → stage → publish → `dd` write/verify on the device → revoke
-drops the connection → re-grant reconnects → unpublish → unstage → revoke →
-delete → orphan check.
+drops the connection → re-grant, re-stage, verify data → empty configfs with the
+driver stopped, restart, node reconnects, verify data → unpublish → unstage → revoke
+→ delete → orphan check. The reboot step needs the script's own driver and a port
+with no other volumes, and is skipped otherwise.

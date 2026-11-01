@@ -166,6 +166,66 @@ func TestHostAccess(t *testing.T) {
 	}
 }
 
+// TestExportVolume covers the rebuild after configfs was emptied and the
+// re-export of a live volume, which must keep its device and grant.
+func TestExportVolume(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "nvmet")
+	tgt := New(root)
+	nqn := "nqn.2014-08.org.nvmexpress:uuid:export"
+	host := "nqn.host:a"
+	nsDir := filepath.Join(root, "subsystems", nqn, "namespaces", "1")
+	link := filepath.Join(root, "ports", "1", "subsystems", nqn)
+
+	if err := tgt.ExportVolume(nqn, "/dev/zvol/nvme/a"); err != nil {
+		t.Fatalf("ExportVolume: %v", err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(nsDir, "device_path")); string(got) != "/dev/zvol/nvme/a\n" {
+		t.Fatalf("device_path = %q", got)
+	}
+	if got, _ := os.ReadFile(filepath.Join(nsDir, "enable")); string(got) != "1\n" {
+		t.Fatalf("enable = %q", got)
+	}
+	if _, err := os.Lstat(link); err != nil {
+		t.Fatalf("expected port link: %v", err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(root, "subsystems", nqn, "attr_allow_any_host")); string(got) != "0\n" {
+		t.Fatalf("attr_allow_any_host = %q", got)
+	}
+	if err := tgt.GrantHost(nqn, host); err != nil {
+		t.Fatalf("GrantHost: %v", err)
+	}
+
+	// configfs refuses device_path writes on an enabled namespace.
+	if err := tgt.ExportVolume(nqn, "/dev/zvol/nvme/other"); err != nil {
+		t.Fatalf("ExportVolume live: %v", err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(nsDir, "device_path")); string(got) != "/dev/zvol/nvme/a\n" {
+		t.Fatalf("live device_path rewritten: %q", got)
+	}
+	hosts, err := tgt.AllowedHosts(nqn)
+	if err != nil {
+		t.Fatalf("AllowedHosts: %v", err)
+	}
+	if len(hosts) != 1 || hosts[0] != host {
+		t.Fatalf("AllowedHosts after re-export = %v", hosts)
+	}
+
+	// A partial tree is completed.
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	if err := tgt.ExportVolume(nqn, "/dev/zvol/nvme/a"); err != nil {
+		t.Fatalf("ExportVolume partial: %v", err)
+	}
+	if _, err := os.Lstat(link); err != nil {
+		t.Fatalf("port link not restored: %v", err)
+	}
+
+	if hosts, err := tgt.AllowedHosts("nqn.missing"); err != nil || len(hosts) != 0 {
+		t.Fatalf("AllowedHosts on missing subsystem = %v, %v", hosts, err)
+	}
+}
+
 func TestListSubsystemsMissingRoot(t *testing.T) {
 	tgt := New(filepath.Join(t.TempDir(), "no", "nvmet"))
 	subs, err := tgt.ListSubsystems()

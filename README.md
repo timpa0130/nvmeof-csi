@@ -37,7 +37,7 @@ flowchart LR
 
 ## Design
 - One zvol + one NVMe subsystem per volume (nsid 1)
-- Everything derived from volumeID — no metadata store
+- Names derived from volumeID, node holding a volume kept as a ZFS property — no metadata store
 
 | field | derivation |
 |---|---|

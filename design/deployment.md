@@ -140,9 +140,10 @@ journalctl -u nvmeof-csi-controller -f
   their connection-loss callback for non-`unix://` addresses. The socat sidecar
   gives them a local socket; if the TCP side drops, they exit on connection
   loss and their containers restart.
-- Attach state survives in `VolumeAttachment`s while the grant lives in
-  in-memory configfs, so rebooting the target host loses grants with the
-  exports themselves.
+- Rebooting the target host empties in-memory configfs. On start the unit's
+  `Reconcile` rebuilds every zvol's export and grant from the holder property on
+  the zvol, without Kubernetes; initiators reconnect by themselves if the host is
+  back within about 10 minutes. See `volume-lifecycle.md` § Recovery.
 - The provisioner ships in the chart so deleting and reinstalling the
   release brings it back; before, a hand-applied provisioner was lost with
   the namespace and PVCs stayed `Pending`.

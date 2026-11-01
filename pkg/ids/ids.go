@@ -98,6 +98,12 @@ func HostNQN(nodeID string) string {
 	return NQNRoot + ".host:" + nodeID
 }
 
+// ParseHostNQN extracts the node ID from a HostNQN. It returns ok=false
+// for any foreign host NQN.
+func ParseHostNQN(hostNQN string) (nodeID string, ok bool) {
+	return strings.CutPrefix(hostNQN, NQNRoot+".host:")
+}
+
 // HostID returns the NVMe host identifier (a UUID) paired with HostNQN.
 // The kernel initiator rejects one host NQN with two host IDs, and one
 // host ID with two host NQNs, so it must be stable per node.
@@ -111,4 +117,18 @@ func HostID(nodeID string) string {
 // Dataset returns the ZFS dataset for a namespace and PVC name.
 func Dataset(pool, namespace, name string) string {
 	return pool + "/" + VolumeID(namespace, name)
+}
+
+// ParseDataset extracts the volume ID from a dataset in the pool. It
+// returns ok=false for any dataset this driver could not have named.
+func ParseDataset(pool, dataset string) (volumeID string, ok bool) {
+	id, found := strings.CutPrefix(dataset, pool+"/")
+	if !found {
+		return "", false
+	}
+	namespace, name, found := strings.Cut(id, "/")
+	if !found || namespace == "" || name == "" || !ValidNamespace(namespace) || !ValidName(name) {
+		return "", false
+	}
+	return id, true
 }

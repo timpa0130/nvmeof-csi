@@ -5,7 +5,6 @@ package csi
 import (
 	"context"
 	"errors"
-	"strings"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/timpa0130/nvmeof-csi/pkg/ids"
@@ -62,7 +61,8 @@ func (s *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 		size = defaultVolumeSize
 	}
 
-	// Idempotency: an existing zvol with matching size is returned.
+	// Idempotency: an existing zvol with matching size is returned, with its
+	// export completed in case an earlier attempt stopped short.
 	if s.d.zfs.Exists(dataset) {
 		existing, err := s.d.zfs.VolSize(dataset)
 		if err != nil {
@@ -70,6 +70,9 @@ func (s *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 		}
 		if existing != size {
 			return nil, status.Errorf(codes.AlreadyExists, "volume %s exists with different size", volumeID)
+		}
+		if err := s.d.exportVolume(volumeID); err != nil {
+			return nil, status.Errorf(codes.Internal, "create volume: %v", err)
 		}
 		return &csi.CreateVolumeResponse{Volume: s.volumeInfo(volumeID, dataset, size)}, nil
 	}
@@ -84,13 +87,7 @@ func (s *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 	if err := s.d.zfs.CreateVolume(dataset, size); err != nil {
 		return fail(err)
 	}
-	if err := s.d.target.CreateSubsystem(nqn); err != nil {
-		return fail(err)
-	}
-	if err := s.d.target.CreateNamespace(nqn, 1, s.d.zfs.DevicePath(dataset)); err != nil {
-		return fail(err)
-	}
-	if err := s.d.target.LinkSubsystemToPort(nqn); err != nil {
+	if err := s.d.exportVolume(volumeID); err != nil {
 		return fail(err)
 	}
 	return &csi.CreateVolumeResponse{Volume: s.volumeInfo(volumeID, dataset, size)}, nil
@@ -117,7 +114,9 @@ func (s *controllerServer) DeleteVolume(ctx context.Context, req *csi.DeleteVolu
 
 // ControllerPublishVolume admits the node's host NQN to the volume's
 // subsystem. A volume held by another node is refused, which is what
-// enforces single-node access across nodes.
+// enforces single-node access across nodes. The export is completed first,
+// so a retry heals a volume Reconcile could not export, and the holder is
+// recorded on the zvol so the grant survives a reboot of the target host.
 func (s *controllerServer) ControllerPublishVolume(ctx context.Context, req *csi.ControllerPublishVolumeRequest) (*csi.ControllerPublishVolumeResponse, error) {
 	volumeID, err := requireVolumeID(req)
 	if err != nil {
@@ -135,8 +134,12 @@ func (s *controllerServer) ControllerPublishVolume(ctx context.Context, req *csi
 		return nil, status.Errorf(codes.InvalidArgument, "derived host NQN too long (%d > %d bytes)", len(hostNQN), ids.MaxNQN)
 	}
 	ns, name := ids.SplitVolumeID(volumeID)
-	if !s.d.zfs.Exists(ids.Dataset(s.d.cfg.Pool, ns, name)) {
+	dataset := ids.Dataset(s.d.cfg.Pool, ns, name)
+	if !s.d.zfs.Exists(dataset) {
 		return nil, status.Errorf(codes.NotFound, "volume %s not found", volumeID)
+	}
+	if err := s.d.exportVolume(volumeID); err != nil {
+		return nil, status.Errorf(codes.Internal, "publish volume: %v", err)
 	}
 	if err := s.d.target.GrantHost(ids.NQN(volumeID), hostNQN); err != nil {
 		if errors.Is(err, nvmet.ErrHeldByOtherHost) {
@@ -144,19 +147,37 @@ func (s *controllerServer) ControllerPublishVolume(ctx context.Context, req *csi
 		}
 		return nil, status.Errorf(codes.Internal, "publish volume: %v", err)
 	}
+	if err := s.d.zfs.SetHolder(dataset, nodeID); err != nil {
+		return nil, status.Errorf(codes.Internal, "publish volume: %v", err)
+	}
 	return &csi.ControllerPublishVolumeResponse{}, nil
 }
 
 // ControllerUnpublishVolume revokes the node's access and drops any
 // connection it still has. An empty node ID revokes every node, per the
-// CSI spec.
+// CSI spec. The holder is cleared before the revoke: until the revoke no other
+// node can be granted, so a retry cannot clear a newer holder's record.
 func (s *controllerServer) ControllerUnpublishVolume(ctx context.Context, req *csi.ControllerUnpublishVolumeRequest) (*csi.ControllerUnpublishVolumeResponse, error) {
 	volumeID, err := requireVolumeID(req)
 	if err != nil {
 		return nil, err
 	}
+	nodeID := req.GetNodeId()
+	ns, name := ids.SplitVolumeID(volumeID)
+	dataset := ids.Dataset(s.d.cfg.Pool, ns, name)
+	if s.d.zfs.Exists(dataset) {
+		holder, err := s.d.zfs.Holder(dataset)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "unpublish volume: %v", err)
+		}
+		if holder != "" && (nodeID == "" || holder == nodeID) {
+			if err := s.d.zfs.ClearHolder(dataset); err != nil {
+				return nil, status.Errorf(codes.Internal, "unpublish volume: %v", err)
+			}
+		}
+	}
 	var hostNQN string
-	if nodeID := req.GetNodeId(); nodeID != "" {
+	if nodeID != "" {
 		hostNQN = ids.HostNQN(nodeID)
 	}
 	if err := s.d.target.RevokeHost(ids.NQN(volumeID), hostNQN); err != nil {
@@ -181,6 +202,9 @@ func (s *controllerServer) ValidateVolumeCapabilities(ctx context.Context, req *
 	}, nil
 }
 
+// ListVolumes reports each volume with the nodes configfs currently grants.
+// The attacher compares that with its VolumeAttachments and publishes again
+// where a grant is missing: the fallback for a grant Reconcile did not restore.
 func (s *controllerServer) ListVolumes(ctx context.Context, req *csi.ListVolumesRequest) (*csi.ListVolumesResponse, error) {
 	datasets, err := s.d.zfs.Volumes()
 	if err != nil {
@@ -188,13 +212,27 @@ func (s *controllerServer) ListVolumes(ctx context.Context, req *csi.ListVolumes
 	}
 	entries := make([]*csi.ListVolumesResponse_Entry, 0, len(datasets))
 	for _, dataset := range datasets {
+		volumeID, ok := ids.ParseDataset(s.d.cfg.Pool, dataset)
+		if !ok {
+			continue // not ours
+		}
 		size, err := s.d.zfs.VolSize(dataset)
 		if err != nil {
 			continue
 		}
-		volumeID := strings.TrimPrefix(dataset, s.d.cfg.Pool+"/")
+		hosts, err := s.d.target.AllowedHosts(ids.NQN(volumeID))
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "list volumes: %v", err)
+		}
+		var nodes []string
+		for _, host := range hosts {
+			if nodeID, ok := ids.ParseHostNQN(host); ok {
+				nodes = append(nodes, nodeID)
+			}
+		}
 		entries = append(entries, &csi.ListVolumesResponse_Entry{
 			Volume: s.volumeInfo(volumeID, dataset, size),
+			Status: &csi.ListVolumesResponse_VolumeStatus{PublishedNodeIds: nodes},
 		})
 	}
 	return &csi.ListVolumesResponse{Entries: entries}, nil
@@ -219,6 +257,16 @@ func (s *controllerServer) ControllerGetCapabilities(ctx context.Context, req *c
 			{
 				Type: &csi.ControllerServiceCapability_Rpc{
 					Rpc: &csi.ControllerServiceCapability_RPC{Type: csi.ControllerServiceCapability_RPC_PUBLISH_UNPUBLISH_VOLUME},
+				},
+			},
+			{
+				Type: &csi.ControllerServiceCapability_Rpc{
+					Rpc: &csi.ControllerServiceCapability_RPC{Type: csi.ControllerServiceCapability_RPC_LIST_VOLUMES},
+				},
+			},
+			{
+				Type: &csi.ControllerServiceCapability_Rpc{
+					Rpc: &csi.ControllerServiceCapability_RPC{Type: csi.ControllerServiceCapability_RPC_LIST_VOLUMES_PUBLISHED_NODES},
 				},
 			},
 		},

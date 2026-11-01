@@ -3,7 +3,8 @@
 # End-to-end test for the NVMe-oF/TCP CSI driver (block mode).
 #
 # Flow: identity -> create-volume -> refused stage -> controller publish ->
-# node stage -> node publish -> dd -> fence, re-stage, verify -> node unpublish ->
+# node stage -> node publish -> dd -> fence, re-stage, verify -> target reboot,
+# reconnect, verify -> node unpublish ->
 # node unstage -> controller unpublish -> delete-volume -> orphan check.
 #
 # Run as root (or with a sudo-capable user). All CSI RPCs go through csc.
@@ -54,13 +55,18 @@ if [ ! -x "$DRIVER_BIN" ]; then
   (cd "$(dirname "$0")/../.." && go build -o "$DRIVER_BIN" ./cmd/nvmeof-csi)
 fi
 
-if ! pgrep -x nvmeof-csi >/dev/null 2>&1; then
+start_driver() {
   log "starting driver"
-  STARTED_DAEMON=1
   setsid "$DRIVER_BIN" --target-addr "$TARGET_ADDR" --port "$TRSVCID" --pool "$POOL" \
-    >/tmp/csi-e2e-driver.log 2>&1 </dev/null &
+    >>/tmp/csi-e2e-driver.log 2>&1 </dev/null &
   for _ in $(seq 1 30); do [ -S "$SOCKET" ] && break; sleep 1; done
   [ -S "$SOCKET" ] || die "driver socket $SOCKET not created"
+}
+
+if ! pgrep -x nvmeof-csi >/dev/null 2>&1; then
+  STARTED_DAEMON=1
+  : >/tmp/csi-e2e-driver.log
+  start_driver
 fi
 
 CSCV=("$CSC" "--endpoint=$ENDPOINT")
@@ -129,6 +135,29 @@ log "node: a fenced node returns by staging again"
 "${CSCV[@]}" node publish --cap "$CAP" --target-path "$TARGET" --staging-target-path "$STAGING" "$VOLUME_ID" >/dev/null
 dd if="$TARGET" of="$WORK/copy" bs=1M count=64 status=none
 cmp "$WORK/orig" "$WORK/copy" || die "data mismatch after fence"
+
+# A reboot empties configfs; do that to this volume with the driver stopped. It
+# needs this script's own driver, and a port with no other volumes to close.
+PORT_SUBS=/sys/kernel/config/nvmet/ports/1/subsystems
+if [ "$STARTED_DAEMON" = 1 ] && [ "$(ls "$PORT_SUBS" | wc -l)" = 1 ]; then
+  log "target reboot: node stays connected through it"
+  pkill -x nvmeof-csi
+  for _ in $(seq 1 10); do pgrep -x nvmeof-csi >/dev/null || break; sleep 1; done
+  rm -f "$SOCKET"
+  SUB="/sys/kernel/config/nvmet/subsystems/$NQN"
+  rm -f "$PORT_SUBS/$NQN" "$SUB/allowed_hosts/"*
+  echo 0 >"$SUB/namespaces/1/enable"
+  rmdir "$SUB/namespaces/1" "$SUB"
+  sleep 12 # longer than the initiator's 10s reconnect delay
+  [ -n "$(ctrl_state)" ] || die "controller removed during target outage"
+  start_driver
+  for _ in $(seq 1 30); do [ "$(ctrl_state)" = "live" ] && break; sleep 1; done
+  [ "$(ctrl_state)" = "live" ] || die "controller not live after target reboot"
+  dd if="$TARGET" of="$WORK/copy" bs=1M count=64 status=none
+  cmp "$WORK/orig" "$WORK/copy" || die "data mismatch after target reboot"
+else
+  log "target reboot: skipped, needs its own driver and an otherwise empty port"
+fi
 
 log "node: unpublish"
 "${CSCV[@]}" node unpublish --target-path "$TARGET" "$VOLUME_ID" >/dev/null

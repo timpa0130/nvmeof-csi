@@ -18,8 +18,9 @@ backend name is derived from the volume ID. The per-volume flows live in
 
 ## What the driver is
 
-One Go binary (`cmd/nvmeof-csi`) that speaks CSI over gRPC. Stateless: no
-metadata store, everything is derived from the volume ID.
+One Go binary (`cmd/nvmeof-csi`) that speaks CSI over gRPC. No metadata store:
+names are derived from the volume ID, and the node holding a volume is a ZFS
+property on its zvol, because a target host reboot empties nvmet configfs.
 
 | Aspect | Choice |
 | --- | --- |
@@ -77,7 +78,7 @@ flowchart TD
 | Parse flags | `--socket` (`/run/csi/nvmeof-csi.sock`), `--listen` (`""` = off), `--target-addr` (`""` → first non-loopback IPv4), `--port` (`4420`), `--pool` (`nvme`), `--mode` (`all`), `--node-id` (`""` → `os.Hostname()`) |
 | Build driver | `csi.NewDriver(Config)`; validates `--mode` ∈ `all|controller|node` (`""` → `all`) |
 | Ensure port | `nvmet.EnsurePort(traddr, trsvcid)` — port `1`, `tcp`, `ipv4`; attrs written only when unset (configfs refuses rewrites on an active port) |
-| Reconcile | removes subsystems carrying our NQN root whose zvol no longer exists |
+| Reconcile | removes subsystems carrying our NQN root whose zvol no longer exists, then rebuilds every zvol's export and grant (`volume-lifecycle.md` § Recovery) |
 | Serve gRPC | `MkdirAll` socket dir, remove stale socket, listen unix, `chmod 0770`, register services per mode; with `--listen`, the same server also serves TCP |
 | Graceful stop | `SIGINT`/`SIGTERM` → `GracefulStop` on both listeners |
 
@@ -92,7 +93,7 @@ flowchart TD
 | Service | RPCs and behavior |
 | --- | --- |
 | Identity | `GetPluginInfo` → `com.timpa0130.nvmeof-csi` / `1.0.0`; `GetPluginCapabilities` → `CONTROLLER_SERVICE` only when the controller is served; `Probe` ready iff nvmet configfs exists |
-| Controller | `CreateVolume`, `DeleteVolume`, `ControllerPublishVolume`, `ControllerUnpublishVolume`, `ValidateVolumeCapabilities`, `ListVolumes`, `GetCapacity`; advertises `CREATE_DELETE_VOLUME`, `PUBLISH_UNPUBLISH_VOLUME` |
+| Controller | `CreateVolume`, `DeleteVolume`, `ControllerPublishVolume`, `ControllerUnpublishVolume`, `ValidateVolumeCapabilities`, `ListVolumes`, `GetCapacity`; advertises `CREATE_DELETE_VOLUME`, `PUBLISH_UNPUBLISH_VOLUME`, `LIST_VOLUMES`, `LIST_VOLUMES_PUBLISHED_NODES` |
 | Node | `NodeStage/Unstage`, `NodePublish/Unpublish`, `NodeGetInfo` (`--node-id`); advertises `STAGE_UNSTAGE_VOLUME` |
 
 Request validation shared by controller and node (`pkg/csi/helpers.go`):
