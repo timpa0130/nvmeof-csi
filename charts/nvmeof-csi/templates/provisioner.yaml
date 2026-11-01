@@ -17,8 +17,15 @@ rules:
     resources: ["persistentvolumeclaims"]
     verbs: ["get", "list", "watch", "update"]
   - apiGroups: ["storage.k8s.io"]
-    resources: ["storageclasses", "csinodes", "volumeattachments"]
+    resources: ["storageclasses", "csinodes"]
     verbs: ["get", "list", "watch"]
+  # patch is for csi-attacher, which records attach state.
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattachments"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattachments/status"]
+    verbs: ["patch"]
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["get", "list", "watch"]
@@ -75,8 +82,16 @@ spec:
           volumeMounts:
             - name: socket-dir
               mountPath: /run/csi
-        # csi-provisioner only dials unix sockets (connection-loss handling
-        # is unix-only), so bridge a local socket to the controller's TCP
+        # Turns VolumeAttachments into ControllerPublish/Unpublish calls.
+        - name: csi-attacher
+          image: registry.k8s.io/sig-storage/csi-attacher:v4.8.1
+          args:
+            - --csi-address=/run/csi/csi.sock
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /run/csi
+        # The sidecars only dial unix sockets (connection-loss handling is
+        # unix-only), so bridge a local socket to the controller's TCP
         # endpoint.
         - name: csi-proxy
           image: alpine/socat:1.8.0.3

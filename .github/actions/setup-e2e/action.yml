@@ -12,7 +12,12 @@ runs:
       shell: bash
       run: |
         sudo apt-get update
-        sudo apt-get install -y "linux-modules-extra-$(uname -r)" nvme-cli
+        sudo apt-get install -y nvme-cli
+        # Kernels 7.0+ ship these modules in linux-modules; no extras package exists.
+        extra="linux-modules-extra-$(uname -r)"
+        if apt-cache show "$extra" >/dev/null 2>&1; then
+          sudo apt-get install -y "$extra"
+        fi
 
     - name: Load NVMe-oF modules and mount configfs
       shell: bash

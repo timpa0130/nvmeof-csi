@@ -52,7 +52,8 @@ func (s *nodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolu
 		return nil, err
 	}
 	nqn := ids.NQN(volumeID)
-	if err := node.Connect(ctx, nqn, s.d.cfg.TargetAddr, s.d.cfg.Port); err != nil {
+	nodeID := s.d.cfg.NodeID
+	if err := node.Connect(ctx, nqn, s.d.cfg.TargetAddr, s.d.cfg.Port, ids.HostNQN(nodeID), ids.HostID(nodeID)); err != nil {
 		return nil, status.Errorf(codes.Internal, "stage volume: %v", err)
 	}
 	ns, err := node.LookupNamespace(nqn)

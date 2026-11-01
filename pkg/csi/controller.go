@@ -4,10 +4,11 @@ package csi
 
 import (
 	"context"
-	"strings"
+	"errors"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/timpa0130/nvmeof-csi/pkg/ids"
+	"github.com/timpa0130/nvmeof-csi/pkg/nvmet"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -60,7 +61,8 @@ func (s *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 		size = defaultVolumeSize
 	}
 
-	// Idempotency: an existing zvol with matching size is returned.
+	// Idempotency: an existing zvol with matching size is returned, with its
+	// export completed in case an earlier attempt stopped short.
 	if s.d.zfs.Exists(dataset) {
 		existing, err := s.d.zfs.VolSize(dataset)
 		if err != nil {
@@ -68,6 +70,9 @@ func (s *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 		}
 		if existing != size {
 			return nil, status.Errorf(codes.AlreadyExists, "volume %s exists with different size", volumeID)
+		}
+		if err := s.d.exportVolume(volumeID); err != nil {
+			return nil, status.Errorf(codes.Internal, "create volume: %v", err)
 		}
 		return &csi.CreateVolumeResponse{Volume: s.volumeInfo(volumeID, dataset, size)}, nil
 	}
@@ -82,13 +87,7 @@ func (s *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 	if err := s.d.zfs.CreateVolume(dataset, size); err != nil {
 		return fail(err)
 	}
-	if err := s.d.target.CreateSubsystem(nqn); err != nil {
-		return fail(err)
-	}
-	if err := s.d.target.CreateNamespace(nqn, 1, s.d.zfs.DevicePath(dataset)); err != nil {
-		return fail(err)
-	}
-	if err := s.d.target.LinkSubsystemToPort(nqn); err != nil {
+	if err := s.d.exportVolume(volumeID); err != nil {
 		return fail(err)
 	}
 	return &csi.CreateVolumeResponse{Volume: s.volumeInfo(volumeID, dataset, size)}, nil
@@ -113,11 +112,77 @@ func (s *controllerServer) DeleteVolume(ctx context.Context, req *csi.DeleteVolu
 	return &csi.DeleteVolumeResponse{}, nil
 }
 
+// ControllerPublishVolume admits the node's host NQN to the volume's
+// subsystem. A volume held by another node is refused, which is what
+// enforces single-node access across nodes. The export is completed first,
+// so a retry heals a volume Reconcile could not export, and the holder is
+// recorded on the zvol so the grant survives a reboot of the target host.
 func (s *controllerServer) ControllerPublishVolume(ctx context.Context, req *csi.ControllerPublishVolumeRequest) (*csi.ControllerPublishVolumeResponse, error) {
+	volumeID, err := requireVolumeID(req)
+	if err != nil {
+		return nil, err
+	}
+	nodeID := req.GetNodeId()
+	if nodeID == "" {
+		return nil, status.Error(codes.InvalidArgument, "node ID is required")
+	}
+	if err := validateCapabilities([]*csi.VolumeCapability{req.GetVolumeCapability()}); err != nil {
+		return nil, err
+	}
+	hostNQN := ids.HostNQN(nodeID)
+	if len(hostNQN) > ids.MaxNQN {
+		return nil, status.Errorf(codes.InvalidArgument, "derived host NQN too long (%d > %d bytes)", len(hostNQN), ids.MaxNQN)
+	}
+	ns, name := ids.SplitVolumeID(volumeID)
+	dataset := ids.Dataset(s.d.cfg.Pool, ns, name)
+	if !s.d.zfs.Exists(dataset) {
+		return nil, status.Errorf(codes.NotFound, "volume %s not found", volumeID)
+	}
+	if err := s.d.exportVolume(volumeID); err != nil {
+		return nil, status.Errorf(codes.Internal, "publish volume: %v", err)
+	}
+	if err := s.d.target.GrantHost(ids.NQN(volumeID), hostNQN); err != nil {
+		if errors.Is(err, nvmet.ErrHeldByOtherHost) {
+			return nil, status.Errorf(codes.FailedPrecondition, "publish volume %s to %s: %v", volumeID, nodeID, err)
+		}
+		return nil, status.Errorf(codes.Internal, "publish volume: %v", err)
+	}
+	if err := s.d.zfs.SetHolder(dataset, nodeID); err != nil {
+		return nil, status.Errorf(codes.Internal, "publish volume: %v", err)
+	}
 	return &csi.ControllerPublishVolumeResponse{}, nil
 }
 
+// ControllerUnpublishVolume revokes the node's access and drops any
+// connection it still has. An empty node ID revokes every node, per the
+// CSI spec. The holder is cleared before the revoke: until the revoke no other
+// node can be granted, so a retry cannot clear a newer holder's record.
 func (s *controllerServer) ControllerUnpublishVolume(ctx context.Context, req *csi.ControllerUnpublishVolumeRequest) (*csi.ControllerUnpublishVolumeResponse, error) {
+	volumeID, err := requireVolumeID(req)
+	if err != nil {
+		return nil, err
+	}
+	nodeID := req.GetNodeId()
+	ns, name := ids.SplitVolumeID(volumeID)
+	dataset := ids.Dataset(s.d.cfg.Pool, ns, name)
+	if s.d.zfs.Exists(dataset) {
+		holder, err := s.d.zfs.Holder(dataset)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "unpublish volume: %v", err)
+		}
+		if holder != "" && (nodeID == "" || holder == nodeID) {
+			if err := s.d.zfs.ClearHolder(dataset); err != nil {
+				return nil, status.Errorf(codes.Internal, "unpublish volume: %v", err)
+			}
+		}
+	}
+	var hostNQN string
+	if nodeID != "" {
+		hostNQN = ids.HostNQN(nodeID)
+	}
+	if err := s.d.target.RevokeHost(ids.NQN(volumeID), hostNQN); err != nil {
+		return nil, status.Errorf(codes.Internal, "unpublish volume: %v", err)
+	}
 	return &csi.ControllerUnpublishVolumeResponse{}, nil
 }
 
@@ -144,11 +209,14 @@ func (s *controllerServer) ListVolumes(ctx context.Context, req *csi.ListVolumes
 	}
 	entries := make([]*csi.ListVolumesResponse_Entry, 0, len(datasets))
 	for _, dataset := range datasets {
+		volumeID, ok := ids.ParseDataset(s.d.cfg.Pool, dataset)
+		if !ok {
+			continue // not ours
+		}
 		size, err := s.d.zfs.VolSize(dataset)
 		if err != nil {
 			continue
 		}
-		volumeID := strings.TrimPrefix(dataset, s.d.cfg.Pool+"/")
 		entries = append(entries, &csi.ListVolumesResponse_Entry{
 			Volume: s.volumeInfo(volumeID, dataset, size),
 		})
@@ -170,6 +238,11 @@ func (s *controllerServer) ControllerGetCapabilities(ctx context.Context, req *c
 			{
 				Type: &csi.ControllerServiceCapability_Rpc{
 					Rpc: &csi.ControllerServiceCapability_RPC{Type: csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME},
+				},
+			},
+			{
+				Type: &csi.ControllerServiceCapability_Rpc{
+					Rpc: &csi.ControllerServiceCapability_RPC{Type: csi.ControllerServiceCapability_RPC_PUBLISH_UNPUBLISH_VOLUME},
 				},
 			},
 		},

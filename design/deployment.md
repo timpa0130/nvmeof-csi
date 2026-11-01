@@ -23,7 +23,7 @@ flowchart LR
 | --- | --- |
 | Static binary | `CGO_ENABLED=0 go build -o bin/nvmeof-csi ./cmd/nvmeof-csi` |
 | Container image | `Dockerfile`: `alpine` + `nvme-cli` + `e2fsprogs` → `ghcr.io/timpa0130/nvmeof-csi` |
-| Helm chart | `charts/nvmeof-csi`: `CSIDriver`, node `DaemonSet`, provisioner `Deployment`, `StorageClass` (no controller: it runs on the target host) |
+| Helm chart | `charts/nvmeof-csi`: `CSIDriver`, node `DaemonSet`, provisioner and attacher `Deployment`, `StorageClass` (no controller: it runs on the target host) |
 | K8s nodes | node plugin `--mode=node` on every worker |
 | systemd unit | `deploy/systemd/nvmeof-csi-controller.service` + `.env` |
 | Target host | controller `--mode=controller --listen=...` on 192.168.1.107 |
@@ -43,6 +43,7 @@ flowchart LR
 ```mermaid
 flowchart LR
     EP["Provisioner"] -->|"unix socket"| PROXY["Socket proxy"]
+    AT["Attacher"] -->|"unix socket"| PROXY
     PROXY -->|"gRPC TCP"| CTRL["Controller"]
     REG["Registrar"] --> NODE["Node plugin"]
     KUBELET["kubelet"] -->|"unix socket"| NODE
@@ -51,14 +52,14 @@ flowchart LR
 
 | Template | Renders |
 | --- | --- |
-| `csi-driver.yaml` | `CSIDriver` named `csi.pluginName` (`com.timpa0130.nvmeof-csi`, must equal `GetPluginInfo`); `attachRequired: false`; `fsGroupPolicy: File` |
+| `csi-driver.yaml` | `CSIDriver` named `csi.pluginName` (`com.timpa0130.nvmeof-csi`, must equal `GetPluginInfo`); `attachRequired: true`; `fsGroupPolicy: File` |
 | `node-daemonset.yaml` | `--mode=node`, `--node-id=$(NODE_NAME)` (`spec.nodeName`), `--target-addr=node.targetAddr`; socket `/var/lib/kubelet/plugins/<pluginName>/csi.sock` (hostPath); `csi-node-driver-registrar` sidecar; `/var/lib/kubelet` with `Bidirectional` propagation; `/dev`; `/sys/block` (for the I/O cap) |
 | `storageclass.yaml` | `StorageClass` `storageClass.name` with `provisioner: csi.pluginName` |
-| `provisioner.yaml` | only when `provisioner.enabled` (default `true`); `ServiceAccount`, `ClusterRole`, `ClusterRoleBinding`, 1-replica `Deployment`, all `nvmeof-csi-provisioner`; `csi-provisioner:v6.4.0` with `--csi-address=/run/csi/csi.sock`, `--extra-create-metadata`; `csi-proxy` sidecar `alpine/socat:1.8.0.3` bridging that socket (`emptyDir`) to `TCP:provisioner.controllerAddr` |
+| `provisioner.yaml` | only when `provisioner.enabled` (default `true`); `ServiceAccount`, `ClusterRole`, `ClusterRoleBinding`, 1-replica `Deployment`, all `nvmeof-csi-provisioner`; `csi-provisioner:v6.4.0` with `--csi-address=/run/csi/csi.sock`, `--extra-create-metadata`; `csi-attacher:v4.8.1` with the same socket (`volumeattachments` patch and `volumeattachments/status` patch in the same role); `csi-proxy` sidecar `alpine/socat:1.8.0.3` bridging that socket (`emptyDir`) to `TCP:provisioner.controllerAddr` |
 
 | Value | Default |
 | --- | --- |
-| `provisioner.enabled` | `true` |
+| `provisioner.enabled` | `true`; also gates the attacher, so disabling it stops volumes attaching |
 | `provisioner.controllerAddr` | `192.168.1.10:9090` (must match the controller's `--listen`) |
 | `image.repository` / `tag` / `pullPolicy` | `ghcr.io/timpa0130/nvmeof-csi` / `latest` / `Always` |
 | `node.targetAddr` | `192.168.1.10` |
@@ -135,10 +136,14 @@ journalctl -u nvmeof-csi-controller -f
 - Stopping the controller does not touch exports: they live in kernel
   configfs, so initiators keep I/O; only provisioning pauses.
 - The gRPC TCP endpoint has no TLS or auth; bind it to the storage network.
-- `csi-provisioner` cannot dial TCP: `csi-lib-utils` rejects its
-  connection-loss callback for non-`unix://` addresses. The socat sidecar
-  gives it a local socket; if the TCP side drops, the provisioner exits on
-  connection loss and its container restarts.
+- `csi-provisioner` and `csi-attacher` cannot dial TCP: `csi-lib-utils` rejects
+  their connection-loss callback for non-`unix://` addresses. The socat sidecar
+  gives them a local socket; if the TCP side drops, they exit on connection
+  loss and their containers restart.
+- Rebooting the target host empties in-memory configfs. On start the unit's
+  `Reconcile` rebuilds every zvol's export and grant from the holder property on
+  the zvol, without Kubernetes; initiators reconnect by themselves if the host is
+  back within about 10 minutes. See `volume-lifecycle.md` § Recovery.
 - The provisioner ships in the chart so deleting and reinstalling the
   release brings it back; before, a hand-applied provisioner was lost with
   the namespace and PVCs stayed `Pending`.

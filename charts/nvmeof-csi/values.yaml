@@ -16,6 +16,7 @@ storageClass:
   name: nvmeof-csi
 
 provisioner:
+  # Also runs csi-attacher; without it no volume can attach to a node.
   enabled: true
   # gRPC TCP endpoint of the controller on the storage host
   # (NVMEOF_CSI_LISTEN of nvmeof-csi-controller.service).

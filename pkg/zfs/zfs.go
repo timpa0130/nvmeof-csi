@@ -11,6 +11,9 @@ import (
 	"time"
 )
 
+// holderProperty is the ZFS user property recording which node holds a zvol.
+const holderProperty = "com.timpa0130.nvmeof-csi:holder"
+
 // ZFS wraps the `zfs` command-line tool.
 type ZFS struct {
 	Pool string
@@ -100,6 +103,40 @@ func (z *ZFS) Volumes() ([]string, error) {
 		}
 	}
 	return vols, nil
+}
+
+// Holder returns the node ID recorded on the zvol by SetHolder, or "" when
+// none is.
+func (z *ZFS) Holder(dataset string) (string, error) {
+	cmd := exec.Command("zfs", "get", "-H", "-o", "value", holderProperty, dataset)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("zfs get holder %s: %w (%s)", dataset, err, out)
+	}
+	holder := strings.TrimSpace(string(out))
+	if holder == "-" {
+		return "", nil
+	}
+	return holder, nil
+}
+
+// SetHolder records the node ID that holds the zvol. Unlike nvmet configfs,
+// the pool survives a reboot of this host.
+func (z *ZFS) SetHolder(dataset, nodeID string) error {
+	cmd := exec.Command("zfs", "set", holderProperty+"="+nodeID, dataset)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("zfs set holder %s: %w (%s)", dataset, err, out)
+	}
+	return nil
+}
+
+// ClearHolder removes the recorded holder. Idempotent.
+func (z *ZFS) ClearHolder(dataset string) error {
+	cmd := exec.Command("zfs", "inherit", holderProperty, dataset)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("zfs clear holder %s: %w (%s)", dataset, err, out)
+	}
+	return nil
 }
 
 // FreeBytes returns the free space available on the pool, in bytes.

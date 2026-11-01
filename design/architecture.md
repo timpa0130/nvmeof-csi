@@ -13,12 +13,14 @@ backend name is derived from the volume ID. The per-volume flows live in
 | --- | --- | --- |
 | Controller | `nvmeof-csi --mode=controller` on the storage host: the CSI Controller service that creates and deletes volumes (ZFS + nvmet) | csi-provisioner's own "provisioner controller" log wording (a Kubernetes control loop) |
 | Provisioner | upstream `csi-provisioner` in the chart's `nvmeof-csi-provisioner` pod: watches PVCs, calls the controller's `CreateVolume`/`DeleteVolume` | the StorageClass `provisioner:` field, which is the driver name `com.timpa0130.nvmeof-csi` |
+| Attacher | upstream `csi-attacher` in the same pod: watches `VolumeAttachment`s, calls the controller's `ControllerPublish`/`ControllerUnpublish` | attaching the device, which the node does at stage time |
 | Node | `nvmeof-csi --mode=node` in the chart's DaemonSet: connects, stages and publishes volumes for kubelet | a Kubernetes `Node` object |
 
 ## What the driver is
 
-One Go binary (`cmd/nvmeof-csi`) that speaks CSI over gRPC. Stateless: no
-metadata store, everything is derived from the volume ID.
+One Go binary (`cmd/nvmeof-csi`) that speaks CSI over gRPC. No metadata store:
+names are derived from the volume ID, and the node holding a volume is a ZFS
+property on its zvol, because a target host reboot empties nvmet configfs.
 
 | Aspect | Choice |
 | --- | --- |
@@ -26,17 +28,19 @@ metadata store, everything is derived from the volume ID.
 | Transport | kernel nvmet target via configfs (`pkg/nvmet`) + `nvme` CLI initiator (`pkg/node`) |
 | Access | `SINGLE_NODE_WRITER` only; block (raw device) or filesystem (`fsType`, default `ext4`) |
 | Not supported | snapshots, clones, expansion, multi-writer |
-| Attach | `ControllerPublish/Unpublish` are no-ops; the node attaches at stage time |
+| Attach | `ControllerPublish/Unpublish` grant and revoke the node's access on the target; the node connects at stage time |
 
 ## Components and topology
 
 The controller runs on the storage host (ZFS + nvmet); node processes run on
-each Kubernetes worker. They never talk to each other directly — the volume
+each Kubernetes worker. The main setup is worker VMs on the storage host itself;
+a separate NAS as the storage host is also supported. They never talk to each other directly — the volume
 ID and the NVMe-oF/TCP connection are the only contract.
 
 ```mermaid
 flowchart LR
     EP["Provisioner"] -->|"gRPC"| CTRL["Controller"]
+    AT["Attacher"] -->|"gRPC"| CTRL
     CTRL --> ZFS["ZFS zvol"]
     CTRL --> NVMET["nvmet target"]
     KUBELET["kubelet"] -->|"gRPC"| NODE["Node"]
@@ -47,6 +51,7 @@ flowchart LR
 | Box | Exact component | Code |
 | --- | --- | --- |
 | Provisioner | `external-provisioner` in the chart's provisioner `Deployment`; reaches `<host>:9090` through a socat unix→TCP sidecar | — |
+| Attacher | `external-attacher` in the same pod, sharing the socat sidecar | — |
 | Controller | `nvmeof-csi --mode=controller` on the target host | `pkg/csi/controller.go` |
 | ZFS zvol | `<pool>/<namespace>/<pvc>`, `/dev/zvol/...` | `pkg/zfs` |
 | nvmet target | `/sys/kernel/config/nvmet`, port `1`, one subsystem per volume | `pkg/nvmet` |
@@ -74,7 +79,7 @@ flowchart TD
 | Parse flags | `--socket` (`/run/csi/nvmeof-csi.sock`), `--listen` (`""` = off), `--target-addr` (`""` → first non-loopback IPv4), `--port` (`4420`), `--pool` (`nvme`), `--mode` (`all`), `--node-id` (`""` → `os.Hostname()`) |
 | Build driver | `csi.NewDriver(Config)`; validates `--mode` ∈ `all|controller|node` (`""` → `all`) |
 | Ensure port | `nvmet.EnsurePort(traddr, trsvcid)` — port `1`, `tcp`, `ipv4`; attrs written only when unset (configfs refuses rewrites on an active port) |
-| Reconcile | removes subsystems carrying our NQN root whose zvol no longer exists |
+| Reconcile | removes subsystems carrying our NQN root whose zvol no longer exists, then rebuilds every zvol's export and grant (`volume-lifecycle.md` § Recovery) |
 | Serve gRPC | `MkdirAll` socket dir, remove stale socket, listen unix, `chmod 0770`, register services per mode; with `--listen`, the same server also serves TCP |
 | Graceful stop | `SIGINT`/`SIGTERM` → `GracefulStop` on both listeners |
 
@@ -89,7 +94,7 @@ flowchart TD
 | Service | RPCs and behavior |
 | --- | --- |
 | Identity | `GetPluginInfo` → `com.timpa0130.nvmeof-csi` / `1.0.0`; `GetPluginCapabilities` → `CONTROLLER_SERVICE` only when the controller is served; `Probe` ready iff nvmet configfs exists |
-| Controller | `CreateVolume`, `DeleteVolume`, `ValidateVolumeCapabilities`, `ListVolumes`, `GetCapacity`; advertises only `CREATE_DELETE_VOLUME`; publish/unpublish no-ops |
+| Controller | `CreateVolume`, `DeleteVolume`, `ControllerPublishVolume`, `ControllerUnpublishVolume`, `ValidateVolumeCapabilities`, `ListVolumes`, `GetCapacity`; advertises `CREATE_DELETE_VOLUME`, `PUBLISH_UNPUBLISH_VOLUME` |
 | Node | `NodeStage/Unstage`, `NodePublish/Unpublish`, `NodeGetInfo` (`--node-id`); advertises `STAGE_UNSTAGE_VOLUME` |
 
 Request validation shared by controller and node (`pkg/csi/helpers.go`):
@@ -108,7 +113,16 @@ what makes create idempotent and delete/reconcile possible without state.
 | NQN | `nqn.2026-08.io.example.nvmeof:<namespace>.<pvc>` | `...:default.vol-a` |
 | dataset | `<pool>/<namespace>/<pvc>` | `nvme/default/vol-a` |
 | zvol device | `/dev/zvol/<dataset>` | `/dev/zvol/nvme/default/vol-a` |
+| namespace UUID | UUID hashed from the NQN | `5c1e...` |
 | initiator device | found by NQN in sysfs, never constructed | `/dev/nvme1n1` |
+
+The node's identity on the target comes from the CSI node ID the same way, so
+the controller and node agree on it without talking to each other:
+
+| Name | Format | Example |
+| --- | --- | --- |
+| host NQN | `nqn.2026-08.io.example.nvmeof.host:<node ID>` | `...host:worker-1` |
+| host ID | UUID hashed from the host NQN | `3f2a...` |
 
 Reverse lookups: `ParseNQN`, `SplitVolumeID`. Validation: `ValidNamespace`
 (no `/` or `.`), `ValidName` (no `/`); limits `MaxNQN`, `MaxDataset`.
@@ -118,7 +132,10 @@ Reverse lookups: `ParseNQN`, `SplitVolumeID`. Validation: `ValidNamespace`
 - The gRPC TCP endpoint (`--listen`) carries the full API of its mode — for
   the controller that includes `CreateVolume`/`DeleteVolume` — with no
   transport auth. Bind it to a trusted interface.
-- Capability advertisement must mirror the mode matrix; publish/unpublish are
-  implemented but not advertised.
+- Capability advertisement must mirror the mode matrix.
+- Host identity is derived, not read from `/etc/nvme/hostnqn`: it needs no
+  host mount or lookup, and cloned VMs sharing that file stay distinct. The
+  host ID is derived too because the kernel initiator rejects one host NQN
+  with two host IDs.
 - Ownership: the driver never chowns. Pods set `securityContext.fsGroup` and
   kubelet applies it under the CSIDriver's `fsGroupPolicy: File`.

@@ -4,8 +4,9 @@ metadata:
   # Must equal the driver's GetPluginInfo name — kubelet matches on it.
   name: {{ .Values.csi.pluginName }}
 spec:
-  # No external-attacher sidecar; ControllerPublish is a no-op.
-  attachRequired: false
+  # VolumeAttachments enforce single-node access: the external-attacher
+  # calls ControllerPublish, which grants the node access on the target.
+  attachRequired: true
   fsGroupPolicy: File
   volumeLifecycleModes:
     - Persistent

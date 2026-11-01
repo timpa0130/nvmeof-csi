@@ -20,6 +20,26 @@ func TestVolumeIDRoundTrip(t *testing.T) {
 	}
 }
 
+func TestHostIdentity(t *testing.T) {
+	if got, want := HostNQN("worker-1"), NQNRoot+".host:worker-1"; got != want {
+		t.Fatalf("HostNQN = %q, want %q", got, want)
+	}
+	if _, ok := ParseNQN(HostNQN("worker-1")); ok {
+		t.Fatal("HostNQN parsed as a volume NQN")
+	}
+	id := HostID("worker-1")
+	if id != HostID("worker-1") {
+		t.Fatal("HostID is not stable")
+	}
+	if id == HostID("worker-2") {
+		t.Fatal("HostID collides across nodes")
+	}
+	parts := strings.Split(id, "-")
+	if len(id) != 36 || len(parts) != 5 || parts[2][0] != '8' {
+		t.Fatalf("HostID not a version 8 UUID: %q", id)
+	}
+}
+
 func TestDefaultNamespace(t *testing.T) {
 	if id := VolumeID("", "vol-a"); id != "default/vol-a" {
 		t.Fatalf("VolumeID with empty ns = %q", id)
@@ -105,5 +125,29 @@ func TestDataset(t *testing.T) {
 	}
 	if d := Dataset("nvme", "", "vol-a"); d != "nvme/default/vol-a" {
 		t.Fatalf("Dataset with empty ns = %q", d)
+	}
+}
+
+func TestParseDataset(t *testing.T) {
+	if id, ok := ParseDataset("nvme", Dataset("nvme", "ns1", "pvc.1")); !ok || id != "ns1/pvc.1" {
+		t.Fatalf("ParseDataset = %q, %v", id, ok)
+	}
+	for _, foreign := range []string{"nvme/swap", "nvme/a/b/c", "nvme/a.b/c", "nvme/a/", "nvme//c", "other/a/b", "nvme-2/a/b"} {
+		if id, ok := ParseDataset("nvme", foreign); ok {
+			t.Fatalf("ParseDataset(%q) = %q, want not ours", foreign, id)
+		}
+	}
+}
+
+func TestNamespaceUUID(t *testing.T) {
+	id := NamespaceUUID("default/a")
+	if id != NamespaceUUID("default/a") {
+		t.Fatal("NamespaceUUID is not stable")
+	}
+	if id == NamespaceUUID("default/b") {
+		t.Fatal("NamespaceUUID collides across volumes")
+	}
+	if len(id) != 36 {
+		t.Fatalf("NamespaceUUID not a UUID: %q", id)
 	}
 }
