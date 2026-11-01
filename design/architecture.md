@@ -33,7 +33,8 @@ property on its zvol, because a target host reboot empties nvmet configfs.
 ## Components and topology
 
 The controller runs on the storage host (ZFS + nvmet); node processes run on
-each Kubernetes worker. They never talk to each other directly — the volume
+each Kubernetes worker. The main setup is worker VMs on the storage host itself;
+a separate NAS as the storage host is also supported. They never talk to each other directly — the volume
 ID and the NVMe-oF/TCP connection are the only contract.
 
 ```mermaid
@@ -93,7 +94,7 @@ flowchart TD
 | Service | RPCs and behavior |
 | --- | --- |
 | Identity | `GetPluginInfo` → `com.timpa0130.nvmeof-csi` / `1.0.0`; `GetPluginCapabilities` → `CONTROLLER_SERVICE` only when the controller is served; `Probe` ready iff nvmet configfs exists |
-| Controller | `CreateVolume`, `DeleteVolume`, `ControllerPublishVolume`, `ControllerUnpublishVolume`, `ValidateVolumeCapabilities`, `ListVolumes`, `GetCapacity`; advertises `CREATE_DELETE_VOLUME`, `PUBLISH_UNPUBLISH_VOLUME`, `LIST_VOLUMES`, `LIST_VOLUMES_PUBLISHED_NODES` |
+| Controller | `CreateVolume`, `DeleteVolume`, `ControllerPublishVolume`, `ControllerUnpublishVolume`, `ValidateVolumeCapabilities`, `ListVolumes`, `GetCapacity`; advertises `CREATE_DELETE_VOLUME`, `PUBLISH_UNPUBLISH_VOLUME` |
 | Node | `NodeStage/Unstage`, `NodePublish/Unpublish`, `NodeGetInfo` (`--node-id`); advertises `STAGE_UNSTAGE_VOLUME` |
 
 Request validation shared by controller and node (`pkg/csi/helpers.go`):
@@ -112,6 +113,7 @@ what makes create idempotent and delete/reconcile possible without state.
 | NQN | `nqn.2026-08.io.example.nvmeof:<namespace>.<pvc>` | `...:default.vol-a` |
 | dataset | `<pool>/<namespace>/<pvc>` | `nvme/default/vol-a` |
 | zvol device | `/dev/zvol/<dataset>` | `/dev/zvol/nvme/default/vol-a` |
+| namespace UUID | UUID hashed from the NQN | `5c1e...` |
 | initiator device | found by NQN in sysfs, never constructed | `/dev/nvme1n1` |
 
 The node's identity on the target comes from the CSI node ID the same way, so

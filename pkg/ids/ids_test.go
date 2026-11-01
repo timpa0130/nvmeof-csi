@@ -139,11 +139,15 @@ func TestParseDataset(t *testing.T) {
 	}
 }
 
-func TestParseHostNQN(t *testing.T) {
-	if id, ok := ParseHostNQN(HostNQN("node.a:1")); !ok || id != "node.a:1" {
-		t.Fatalf("ParseHostNQN = %q, %v", id, ok)
+func TestNamespaceUUID(t *testing.T) {
+	id := NamespaceUUID("default/a")
+	if id != NamespaceUUID("default/a") {
+		t.Fatal("NamespaceUUID is not stable")
 	}
-	if id, ok := ParseHostNQN(NQN("default/a")); ok {
-		t.Fatalf("ParseHostNQN on a volume NQN = %q", id)
+	if id == NamespaceUUID("default/b") {
+		t.Fatal("NamespaceUUID collides across volumes")
+	}
+	if len(id) != 36 {
+		t.Fatalf("NamespaceUUID not a UUID: %q", id)
 	}
 }

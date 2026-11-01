@@ -202,9 +202,6 @@ func (s *controllerServer) ValidateVolumeCapabilities(ctx context.Context, req *
 	}, nil
 }
 
-// ListVolumes reports each volume with the nodes configfs currently grants.
-// The attacher compares that with its VolumeAttachments and publishes again
-// where a grant is missing: the fallback for a grant Reconcile did not restore.
 func (s *controllerServer) ListVolumes(ctx context.Context, req *csi.ListVolumesRequest) (*csi.ListVolumesResponse, error) {
 	datasets, err := s.d.zfs.Volumes()
 	if err != nil {
@@ -220,19 +217,8 @@ func (s *controllerServer) ListVolumes(ctx context.Context, req *csi.ListVolumes
 		if err != nil {
 			continue
 		}
-		hosts, err := s.d.target.AllowedHosts(ids.NQN(volumeID))
-		if err != nil {
-			return nil, status.Errorf(codes.Internal, "list volumes: %v", err)
-		}
-		var nodes []string
-		for _, host := range hosts {
-			if nodeID, ok := ids.ParseHostNQN(host); ok {
-				nodes = append(nodes, nodeID)
-			}
-		}
 		entries = append(entries, &csi.ListVolumesResponse_Entry{
 			Volume: s.volumeInfo(volumeID, dataset, size),
-			Status: &csi.ListVolumesResponse_VolumeStatus{PublishedNodeIds: nodes},
 		})
 	}
 	return &csi.ListVolumesResponse{Entries: entries}, nil
@@ -257,16 +243,6 @@ func (s *controllerServer) ControllerGetCapabilities(ctx context.Context, req *c
 			{
 				Type: &csi.ControllerServiceCapability_Rpc{
 					Rpc: &csi.ControllerServiceCapability_RPC{Type: csi.ControllerServiceCapability_RPC_PUBLISH_UNPUBLISH_VOLUME},
-				},
-			},
-			{
-				Type: &csi.ControllerServiceCapability_Rpc{
-					Rpc: &csi.ControllerServiceCapability_RPC{Type: csi.ControllerServiceCapability_RPC_LIST_VOLUMES},
-				},
-			},
-			{
-				Type: &csi.ControllerServiceCapability_Rpc{
-					Rpc: &csi.ControllerServiceCapability_RPC{Type: csi.ControllerServiceCapability_RPC_LIST_VOLUMES_PUBLISHED_NODES},
 				},
 			},
 		},

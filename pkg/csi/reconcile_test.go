@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -125,7 +126,7 @@ func (f *reconcileFixture) publish(volumeID, nodeID string) error {
 	return err
 }
 
-// published returns ListVolumes as volume ID -> published node IDs.
+// published returns each listed volume's granted hosts, as volume ID -> node IDs.
 func (f *reconcileFixture) published() map[string][]string {
 	f.t.Helper()
 	resp, err := f.ctrl.ListVolumes(context.Background(), &csi.ListVolumesRequest{})
@@ -134,14 +135,27 @@ func (f *reconcileFixture) published() map[string][]string {
 	}
 	out := map[string][]string{}
 	for _, e := range resp.GetEntries() {
-		// The attacher skips entries without a status, and would never
-		// notice a lost grant.
-		if e.GetStatus() == nil {
-			f.t.Fatalf("entry %s has no status", e.GetVolume().GetVolumeId())
+		volumeID := e.GetVolume().GetVolumeId()
+		hosts, err := f.d.target.AllowedHosts(ids.NQN(volumeID))
+		if err != nil {
+			f.t.Fatalf("AllowedHosts: %v", err)
 		}
-		out[e.GetVolume().GetVolumeId()] = e.GetStatus().GetPublishedNodeIds()
+		var nodes []string
+		for _, host := range hosts {
+			nodes = append(nodes, strings.TrimPrefix(host, ids.HostNQN("")))
+		}
+		out[volumeID] = nodes
 	}
 	return out
+}
+
+func (f *reconcileFixture) namespaceUUID(volumeID string) string {
+	f.t.Helper()
+	got, err := os.ReadFile(filepath.Join(f.root, "subsystems", ids.NQN(volumeID), "namespaces", "1", "device_uuid"))
+	if err != nil {
+		f.t.Fatalf("read device_uuid: %v", err)
+	}
+	return string(got)
 }
 
 func (f *reconcileFixture) exported(volumeID string) bool {
@@ -155,8 +169,8 @@ func (f *reconcileFixture) exported(volumeID string) bool {
 }
 
 // TestReconcileAfterReboot walks a reboot of the target host: exports and the
-// recorded grant come back with no publish, so the holder's first reconnect is
-// accepted and single-node access holds throughout.
+// recorded grant come back with no publish and the namespace keeps its UUID, so
+// the holder's first reconnect is accepted and it keeps its device.
 func TestReconcileAfterReboot(t *testing.T) {
 	f := newReconcileFixture(t, "nvme/default/a", "nvme/team/b")
 	f.start()
@@ -167,6 +181,7 @@ func TestReconcileAfterReboot(t *testing.T) {
 	if got := f.published(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("published before reboot = %v", got)
 	}
+	uuid := f.namespaceUUID("default/a")
 
 	f.reboot()
 	f.start()
@@ -175,6 +190,9 @@ func TestReconcileAfterReboot(t *testing.T) {
 		if !f.exported(id) {
 			t.Fatalf("%s not re-exported", id)
 		}
+	}
+	if got := f.namespaceUUID("default/a"); got != uuid {
+		t.Fatalf("namespace UUID changed across reboot: %q -> %q", uuid, got)
 	}
 	if got := f.published(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("published after reboot = %v", got)
@@ -266,30 +284,6 @@ func TestPublishFailsUntilHolderRecorded(t *testing.T) {
 	}
 	if f.zfs.holders["nvme/default/a"] != "node-1" {
 		t.Fatalf("holder = %q", f.zfs.holders["nvme/default/a"])
-	}
-}
-
-// TestPublishRestoresUnrecordedGrant covers the attacher fallback: a grant with
-// no record is missing after a reboot, and the attacher's publish restores it.
-func TestPublishRestoresUnrecordedGrant(t *testing.T) {
-	f := newReconcileFixture(t, "nvme/default/a")
-	f.start()
-	if err := f.publish("default/a", "node-1"); err != nil {
-		t.Fatalf("publish: %v", err)
-	}
-	delete(f.zfs.holders, "nvme/default/a")
-	f.reboot()
-	f.start()
-	want := map[string][]string{"default/a": nil}
-	if got := f.published(); !reflect.DeepEqual(got, want) {
-		t.Fatalf("published after reboot = %v", got)
-	}
-	if err := f.publish("default/a", "node-1"); err != nil {
-		t.Fatalf("publish after reboot: %v", err)
-	}
-	want = map[string][]string{"default/a": {"node-1"}}
-	if got := f.published(); !reflect.DeepEqual(got, want) {
-		t.Fatalf("published after re-publish = %v", got)
 	}
 }
 
@@ -399,26 +393,5 @@ func TestCreateVolumeIdempotentReexports(t *testing.T) {
 	}
 	if !f.exported("default/a") {
 		t.Fatal("idempotent CreateVolume did not export")
-	}
-}
-
-// The attacher only reconciles when both capabilities are advertised.
-func TestControllerAdvertisesPublishedNodes(t *testing.T) {
-	f := newReconcileFixture(t)
-	resp, err := f.ctrl.ControllerGetCapabilities(context.Background(), &csi.ControllerGetCapabilitiesRequest{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := map[csi.ControllerServiceCapability_RPC_Type]bool{}
-	for _, c := range resp.GetCapabilities() {
-		got[c.GetRpc().GetType()] = true
-	}
-	for _, want := range []csi.ControllerServiceCapability_RPC_Type{
-		csi.ControllerServiceCapability_RPC_LIST_VOLUMES,
-		csi.ControllerServiceCapability_RPC_LIST_VOLUMES_PUBLISHED_NODES,
-	} {
-		if !got[want] {
-			t.Fatalf("capability %v not advertised", want)
-		}
 	}
 }

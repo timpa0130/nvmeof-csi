@@ -208,7 +208,7 @@ sequenceDiagram
 | ensure port | `EnsurePort`, in `main` before `Reconcile` |
 | tear down orphans | subsystems with our NQN root whose dataset no longer exists; `TeardownVolume(nqn)`; failure stops startup |
 | list zvols, read holders | `zfs.Volumes()`; failure stops startup. `ParseDataset` skips any zvol not named `<pool>/<namespace>/<name>`; `zfs get` of the holder property |
-| rebuild each, grant holder | `restoreVolume`: waits up to 5s for `/dev/zvol/<dataset>`, `PrepareVolume`, `GrantHost` when a holder is recorded; failure is logged and the next zvol continues |
+| rebuild each, grant holder | `restoreVolume`: waits up to 5s for `/dev/zvol/<dataset>`, `PrepareVolume` with `NamespaceUUID(volumeID)`, `GrantHost` when a holder is recorded; failure is logged and the next zvol continues |
 | link all to port | `LinkSubsystemToPort` for every restored volume, as the last step |
 
 Live exports are untouched, so initiators keep their I/O across a controller
@@ -217,6 +217,10 @@ kept.
 
 ### Design notes
 
+- Goal: volumes are unavailable while the target host is down, and recover by
+  themselves once it is back. Workers on the same host restart with it and stage
+  from scratch. Workers beside a separate NAS keep running and reconnect, which is
+  what the three choices below are for.
 - Why the holder is stored: a host refused by nvmet gets do-not-retry and removes
   its controller, and kubelet does not re-stage a running pod. So grants must be
   back before a host can reach a subsystem, which rules out waiting for the attacher.
@@ -224,16 +228,16 @@ kept.
 - Why links come last and together: the first link opens the shared port, and a
   host connecting to a subsystem not linked yet is refused the same way. Linking
   after the slow steps leaves only the time between links.
-- The attacher stays as a fallback: `ListVolumes` reports granted nodes as
-  `published_node_ids`, and `ReconcileVA`, every `--reconcile-sync` (default 1m),
-  publishes a `VolumeAttachment` whose grant is missing. That restores the grant but
-  not a controller already removed: its pods must restart.
+- Why the namespace UUID is derived: nvmet randomises it on every rebuild, and an
+  initiator removes a namespace whose identifiers changed when it reconnects. A
+  namespace enabled before this keeps its random UUID until its next rebuild, so its
+  pods need one restart after the first reboot.
 - A bad zvol must not exit the process: that would keep every other volume down.
   `ControllerPublishVolume` retries its export.
 - Every zvol matching the naming scheme is exported, since the pool is dedicated
   to the driver.
-- Known gap: a volume `Reconcile` could not restore, or one granted with no record,
-  refuses its node once the port opens, so that node loses its controller.
+- Known gap: a volume `Reconcile` could not restore refuses its node once the port
+  opens, so that node loses its controller and its pods must restart.
 - Known gap: if the target stays away longer than `ctrl_loss_tmo`, the node drops
   the controller and filesystems on it fail; the driver does not recover that.
 - Known gap: a grant or record with no `VolumeAttachment` left is never revoked, and
@@ -244,7 +248,7 @@ kept.
 | RPC | Behavior |
 | --- | --- |
 | `ValidateVolumeCapabilities` | zvol must exist (`NotFound` otherwise), then capability check |
-| `ListVolumes` | `zfs list -t volume`, with `volsize` and granted nodes per volume; zvols outside the naming scheme are skipped |
+| `ListVolumes` | `zfs list -t volume`, with `volsize` per dataset; zvols outside the naming scheme are skipped |
 | `GetCapacity` | `zpool list -o free <pool>` |
 
 ## Manual end-to-end check
@@ -253,6 +257,7 @@ kept.
 using `csc` against the driver socket: probe → create → stage refused → grant →
 second node refused → stage → publish → `dd` write/verify on the device → revoke
 drops the connection → re-grant, re-stage, verify data → empty configfs with the
-driver stopped, restart, node reconnects, verify data → unpublish → unstage → revoke
-→ delete → orphan check. The reboot step needs the script's own driver and a port
-with no other volumes, and is skipped otherwise.
+driver stopped and restart it, twice: once staging from scratch (same-node setup),
+once with the node still connected (separate NAS), verifying data each time →
+unpublish → unstage → revoke → delete → orphan check. The reboot steps need the
+script's own driver and a port with no other volumes, and are skipped otherwise.

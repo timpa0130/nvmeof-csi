@@ -3,8 +3,8 @@
 # End-to-end test for the NVMe-oF/TCP CSI driver (block mode).
 #
 # Flow: identity -> create-volume -> refused stage -> controller publish ->
-# node stage -> node publish -> dd -> fence, re-stage, verify -> target reboot,
-# reconnect, verify -> node unpublish ->
+# node stage -> node publish -> dd -> fence, re-stage, verify -> target reboot
+# with a fresh stage, verify -> target reboot with a live node, verify -> node unpublish ->
 # node unstage -> controller unpublish -> delete-volume -> orphan check.
 #
 # Run as root (or with a sudo-capable user). All CSI RPCs go through csc.
@@ -140,14 +140,29 @@ cmp "$WORK/orig" "$WORK/copy" || die "data mismatch after fence"
 # needs this script's own driver, and a port with no other volumes to close.
 PORT_SUBS=/sys/kernel/config/nvmet/ports/1/subsystems
 if [ "$STARTED_DAEMON" = 1 ] && [ "$(ls "$PORT_SUBS" | wc -l)" = 1 ]; then
-  log "target reboot: node stays connected through it"
-  pkill -x nvmeof-csi
-  for _ in $(seq 1 10); do pgrep -x nvmeof-csi >/dev/null || break; sleep 1; done
-  rm -f "$SOCKET"
-  SUB="/sys/kernel/config/nvmet/subsystems/$NQN"
-  rm -f "$PORT_SUBS/$NQN" "$SUB/allowed_hosts/"*
-  echo 0 >"$SUB/namespaces/1/enable"
-  rmdir "$SUB/namespaces/1" "$SUB"
+  stop_and_wipe() {
+    pkill -x nvmeof-csi
+    for _ in $(seq 1 10); do pgrep -x nvmeof-csi >/dev/null || break; sleep 1; done
+    rm -f "$SOCKET"
+    SUB="/sys/kernel/config/nvmet/subsystems/$NQN"
+    rm -f "$PORT_SUBS/$NQN" "$SUB/allowed_hosts/"*
+    echo 0 >"$SUB/namespaces/1/enable"
+    rmdir "$SUB/namespaces/1" "$SUB"
+  }
+
+  log "target reboot, same node: worker restarts too and stages from scratch"
+  "${CSCV[@]}" node unpublish --target-path "$TARGET" "$VOLUME_ID" >/dev/null
+  "${CSCV[@]}" node unstage --staging-target-path "$STAGING" "$VOLUME_ID" >/dev/null
+  stop_and_wipe
+  start_driver
+  # No controller publish: the attachment outlives the reboot, so the grant must too.
+  "${CSCV[@]}" node stage --cap "$CAP" --staging-target-path "$STAGING" "$VOLUME_ID" >/dev/null
+  "${CSCV[@]}" node publish --cap "$CAP" --target-path "$TARGET" --staging-target-path "$STAGING" "$VOLUME_ID" >/dev/null
+  dd if="$TARGET" of="$WORK/copy" bs=1M count=64 status=none
+  cmp "$WORK/orig" "$WORK/copy" || die "data mismatch after target reboot"
+
+  log "target reboot, separate NAS: running worker reconnects"
+  stop_and_wipe
   sleep 12 # longer than the initiator's 10s reconnect delay
   [ -n "$(ctrl_state)" ] || die "controller removed during target outage"
   start_driver

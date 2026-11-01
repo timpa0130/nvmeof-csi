@@ -106,7 +106,7 @@ func (d *Driver) exportVolume(volumeID string) error {
 	if err := d.zfs.WaitForDevice(dataset, deviceWait); err != nil {
 		return err
 	}
-	return d.target.ExportVolume(ids.NQN(volumeID), d.zfs.DevicePath(dataset))
+	return d.target.ExportVolume(ids.NQN(volumeID), d.zfs.DevicePath(dataset), ids.NamespaceUUID(volumeID))
 }
 
 // restoreVolume rebuilds a zvol's export without its port link and admits its
@@ -118,7 +118,7 @@ func (d *Driver) restoreVolume(volumeID string) error {
 		return err
 	}
 	nqn := ids.NQN(volumeID)
-	if err := d.target.PrepareVolume(nqn, d.zfs.DevicePath(dataset)); err != nil {
+	if err := d.target.PrepareVolume(nqn, d.zfs.DevicePath(dataset), ids.NamespaceUUID(volumeID)); err != nil {
 		return err
 	}
 	holder, err := d.zfs.Holder(dataset)

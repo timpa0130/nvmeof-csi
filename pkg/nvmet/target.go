@@ -194,8 +194,8 @@ func (t *Target) AllowedHosts(nqn string) ([]string, error) {
 // port. Idempotent and safe on a live export: it completes whatever is
 // missing, such as after a reboot emptied configfs, and keeps connections
 // and grants.
-func (t *Target) ExportVolume(nqn, devicePath string) error {
-	if err := t.PrepareVolume(nqn, devicePath); err != nil {
+func (t *Target) ExportVolume(nqn, devicePath, nsUUID string) error {
+	if err := t.PrepareVolume(nqn, devicePath, nsUUID); err != nil {
 		return err
 	}
 	return t.LinkSubsystemToPort(nqn)
@@ -203,17 +203,18 @@ func (t *Target) ExportVolume(nqn, devicePath string) error {
 
 // PrepareVolume is ExportVolume without the port link, so that grants can be
 // in place before any host can reach the subsystem. Idempotent.
-func (t *Target) PrepareVolume(nqn, devicePath string) error {
+func (t *Target) PrepareVolume(nqn, devicePath, nsUUID string) error {
 	if err := t.CreateSubsystem(nqn); err != nil {
 		return err
 	}
-	return t.CreateNamespace(nqn, 1, devicePath)
+	return t.CreateNamespace(nqn, 1, devicePath, nsUUID)
 }
 
-// CreateNamespace creates subsystems/<nqn>/namespaces/<nsid>, points it
-// at devicePath and enables it. Idempotent: an enabled namespace is left
-// alone, since configfs refuses device_path writes while it is enabled.
-func (t *Target) CreateNamespace(nqn string, nsid int32, devicePath string) error {
+// CreateNamespace creates subsystems/<nqn>/namespaces/<nsid>, points it at
+// devicePath with the given UUID and enables it. Idempotent: an enabled
+// namespace is left alone, since configfs refuses these writes while it is
+// enabled.
+func (t *Target) CreateNamespace(nqn string, nsid int32, devicePath, nsUUID string) error {
 	nsDir := filepath.Join(t.root, "subsystems", nqn, "namespaces", fmt.Sprintf("%d", nsid))
 	if err := os.MkdirAll(nsDir, 0o755); err != nil {
 		return fmt.Errorf("mkdir namespace: %w", err)
@@ -221,6 +222,9 @@ func (t *Target) CreateNamespace(nqn string, nsid int32, devicePath string) erro
 	enable := filepath.Join(nsDir, "enable")
 	if cur, err := os.ReadFile(enable); err == nil && strings.TrimSpace(string(cur)) == "1" {
 		return nil
+	}
+	if err := writeFile(filepath.Join(nsDir, "device_uuid"), nsUUID+"\n"); err != nil {
+		return fmt.Errorf("write device_uuid: %w", err)
 	}
 	if err := writeFile(filepath.Join(nsDir, "device_path"), devicePath+"\n"); err != nil {
 		return fmt.Errorf("write device_path: %w", err)

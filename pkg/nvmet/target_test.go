@@ -9,6 +9,8 @@ import (
 	"testing"
 )
 
+const testUUID = "00000000-0000-8000-8000-000000000001"
+
 // TestNvmetLifecycle exercises the full create/link/teardown flow
 // against a scratch configfs tree.
 func TestNvmetLifecycle(t *testing.T) {
@@ -28,7 +30,7 @@ func TestNvmetLifecycle(t *testing.T) {
 		if err := tgt.CreateSubsystem(nqn); err != nil {
 			t.Fatalf("CreateSubsystem: %v", err)
 		}
-		if err := tgt.CreateNamespace(nqn, 1, "/dev/zvol/nvme/test-1"); err != nil {
+		if err := tgt.CreateNamespace(nqn, 1, "/dev/zvol/nvme/test-1", testUUID); err != nil {
 			t.Fatalf("CreateNamespace: %v", err)
 		}
 		if err := tgt.LinkSubsystemToPort(nqn); err != nil {
@@ -176,11 +178,14 @@ func TestExportVolume(t *testing.T) {
 	nsDir := filepath.Join(root, "subsystems", nqn, "namespaces", "1")
 	link := filepath.Join(root, "ports", "1", "subsystems", nqn)
 
-	if err := tgt.ExportVolume(nqn, "/dev/zvol/nvme/a"); err != nil {
+	if err := tgt.ExportVolume(nqn, "/dev/zvol/nvme/a", testUUID); err != nil {
 		t.Fatalf("ExportVolume: %v", err)
 	}
 	if got, _ := os.ReadFile(filepath.Join(nsDir, "device_path")); string(got) != "/dev/zvol/nvme/a\n" {
 		t.Fatalf("device_path = %q", got)
+	}
+	if got, _ := os.ReadFile(filepath.Join(nsDir, "device_uuid")); string(got) != testUUID+"\n" {
+		t.Fatalf("device_uuid = %q", got)
 	}
 	if got, _ := os.ReadFile(filepath.Join(nsDir, "enable")); string(got) != "1\n" {
 		t.Fatalf("enable = %q", got)
@@ -196,7 +201,7 @@ func TestExportVolume(t *testing.T) {
 	}
 
 	// configfs refuses device_path writes on an enabled namespace.
-	if err := tgt.ExportVolume(nqn, "/dev/zvol/nvme/other"); err != nil {
+	if err := tgt.ExportVolume(nqn, "/dev/zvol/nvme/other", "other-uuid"); err != nil {
 		t.Fatalf("ExportVolume live: %v", err)
 	}
 	if got, _ := os.ReadFile(filepath.Join(nsDir, "device_path")); string(got) != "/dev/zvol/nvme/a\n" {
@@ -214,7 +219,7 @@ func TestExportVolume(t *testing.T) {
 	if err := os.Remove(link); err != nil {
 		t.Fatal(err)
 	}
-	if err := tgt.ExportVolume(nqn, "/dev/zvol/nvme/a"); err != nil {
+	if err := tgt.ExportVolume(nqn, "/dev/zvol/nvme/a", testUUID); err != nil {
 		t.Fatalf("ExportVolume partial: %v", err)
 	}
 	if _, err := os.Lstat(link); err != nil {
