@@ -12,6 +12,8 @@ on:
       - pkg/**
       - cmd/**
       - test/manual/e2e.sh
+      - go.mod
+      - go.sum
 
 jobs:
   e2e:
