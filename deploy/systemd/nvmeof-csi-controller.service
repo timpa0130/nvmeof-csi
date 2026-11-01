@@ -13,6 +13,9 @@ After=zfs.target zfs-import.target zfs-volumes.target
 # nvmet lives in configfs; modules loaded before EnsurePort.
 Requires=sys-kernel-config.mount
 After=sys-kernel-config.mount systemd-modules-load.service
+# Wants: a failed download still starts the installed binary.
+Wants=nvmeof-csi-upgrade.service
+After=nvmeof-csi-upgrade.service
 
 [Service]
 Type=simple

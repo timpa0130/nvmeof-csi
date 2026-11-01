@@ -13,7 +13,8 @@ running is in `architecture.md` and `volume-lifecycle.md`.
 flowchart LR
     SRC["Go source"] --> BIN["Static binary"]
     BIN --> IMG["Container image"]
-    BIN --> UNIT["systemd unit"]
+    BIN --> REL["GitHub release"]
+    REL --> UNIT["systemd unit"]
     IMG --> CHART["Helm chart"]
     CHART --> NODES["K8s nodes"]
     UNIT --> TARGET["Target host"]
@@ -25,7 +26,8 @@ flowchart LR
 | Container image | `Dockerfile`: `alpine` + `nvme-cli` + `e2fsprogs` → `ghcr.io/timpa0130/nvmeof-csi` |
 | Helm chart | `charts/nvmeof-csi`: `CSIDriver`, node `DaemonSet`, provisioner and attacher `Deployment`, `StorageClass` (no controller: it runs on the target host) |
 | K8s nodes | node plugin `--mode=node` on every worker |
-| systemd unit | `deploy/systemd/nvmeof-csi-controller.service` + `.env` |
+| GitHub release | asset `nvmeof-csi` (linux/amd64), `releases/latest/download/nvmeof-csi` |
+| systemd unit | `deploy/systemd/nvmeof-csi-controller.service` + `.env`, `nvmeof-csi-upgrade.service` |
 | Target host | controller `--mode=controller --listen=...` on 192.168.1.107 |
 
 ## Container image
@@ -75,6 +77,8 @@ controller workload.
 flowchart LR
     NET["Network online"] --> SVC["Controller service"]
     ZFS["ZFS pool ready"] --> SVC
+    NET --> UPD["Upgrade service"]
+    UPD --> SVC
     CFG["configfs mounted"] --> MOD["Load nvmet modules"]
     MOD --> SVC
     SVC -->|"serves"| GRPC["gRPC over TCP"]
@@ -84,6 +88,7 @@ flowchart LR
 | --- | --- |
 | Network online | `Wants=` / `After=network-online.target` |
 | ZFS pool ready | `Wants=zfs.target`; `After=zfs.target zfs-import.target zfs-volumes.target` |
+| Upgrade service | `nvmeof-csi-upgrade.service`, `Type=oneshot`: `curl ${NVMEOF_CSI_URL}` to `nvmeof-csi.new`, `chmod`, `mv` over the binary; the controller has `Wants=` / `After=` on it |
 | configfs mounted | `Requires=` / `After=sys-kernel-config.mount` |
 | Load nvmet modules | `ExecStartPre=+/sbin/modprobe -a nvmet nvmet_tcp`; `After=systemd-modules-load.service` |
 | Controller service | `nvmeof-csi-controller.service`, `ExecStart=/usr/local/bin/nvmeof-csi --mode=controller ...` |
@@ -92,8 +97,9 @@ flowchart LR
 | Repo file | Installed as |
 | --- | --- |
 | `deploy/systemd/nvmeof-csi-controller.service` | `/etc/systemd/system/nvmeof-csi-controller.service` |
+| `deploy/systemd/nvmeof-csi-upgrade.service` | `/etc/systemd/system/nvmeof-csi-upgrade.service` |
 | `deploy/systemd/nvmeof-csi-controller.env` | `/etc/default/nvmeof-csi-controller` |
-| `bin/nvmeof-csi` (linux build) | `/usr/local/bin/nvmeof-csi` |
+| release asset `nvmeof-csi` (downloaded by the upgrade service) | `/usr/local/bin/nvmeof-csi` |
 
 | Flag | Source |
 | --- | --- |
@@ -108,6 +114,9 @@ flowchart LR
 | `User=root` | nvmet configfs files are root-owned |
 | `CapabilityBoundingSet=CAP_SYS_ADMIN CAP_DAC_OVERRIDE` | `zfs`/`zpool` ioctls on `/dev/zfs` need `CAP_SYS_ADMIN` |
 | `ExecStartPre=+...` | `modprobe` needs `CAP_SYS_MODULE`; `+` runs it outside the bounding set |
+| `Wants=nvmeof-csi-upgrade.service` | not `Requires=`: a failed download still starts the installed binary |
+| `RemainAfterExit=yes` (upgrade service) | stays active after success, so it runs once per boot and not on controller crash restarts |
+| `NVMEOF_CSI_URL` | chooses the binary: `releases/latest/download/nvmeof-csi` or `releases/download/<tag>/nvmeof-csi` |
 | `NoNewPrivileges`, `ProtectSystem=full`, `ProtectHome`, `PrivateTmp` | hardening that leaves `/sys` and `/dev` writable |
 | no `ProtectKernelTunables` / `PrivateDevices` | would make `/sys` read-only / hide `/dev/zfs`, `/dev/zvol` |
 | `RuntimeDirectory=csi` | creates `/run/csi` for the socket; removed on stop |
@@ -116,23 +125,38 @@ flowchart LR
 Install and enable:
 
 ```bash
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/nvmeof-csi ./cmd/nvmeof-csi
-scp bin/nvmeof-csi deploy/systemd/nvmeof-csi-controller.* root@192.168.1.107:/tmp/
+scp deploy/systemd/nvmeof-csi-* root@192.168.1.107:/tmp/
 ```
 
-On the target host:
+On the target host (needs `curl`; the first start downloads the binary):
 
 ```bash
-install -m 0755 /tmp/nvmeof-csi /usr/local/bin/nvmeof-csi
-install -m 0644 /tmp/nvmeof-csi-controller.service /etc/systemd/system/
+install -m 0644 /tmp/nvmeof-csi-controller.service /tmp/nvmeof-csi-upgrade.service /etc/systemd/system/
 install -m 0644 /tmp/nvmeof-csi-controller.env /etc/default/nvmeof-csi-controller
 systemctl daemon-reload
 systemctl enable --now nvmeof-csi-controller
 journalctl -u nvmeof-csi-controller -f
 ```
 
+Upgrade now, or after changing `NVMEOF_CSI_URL`:
+
+```bash
+systemctl restart nvmeof-csi-upgrade nvmeof-csi-controller
+```
+
+To run a binary installed by hand, stop the downloads:
+
+```bash
+systemctl mask nvmeof-csi-upgrade
+```
+
 ## Design notes
 
+- With the default `NVMEOF_CSI_URL` every reboot moves to the latest release,
+  including a bad one. Pin a tag to upgrade only when you choose.
+- The binary is not checked before it replaces the old one, beyond `curl -f`
+  failing on an HTTP error or a cut-off download. It is trusted through HTTPS
+  only; the release has no signature.
 - Stopping the controller does not touch exports: they live in kernel
   configfs, so initiators keep I/O; only provisioning pauses.
 - The gRPC TCP endpoint has no TLS or auth; bind it to the storage network.

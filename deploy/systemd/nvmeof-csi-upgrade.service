@@ -1,0 +1,18 @@
+# Downloads the nvmeof-csi binary chosen by NVMEOF_CSI_URL, once per boot.
+# See design/deployment.md.
+
+[Unit]
+Description=nvmeof-csi binary upgrade
+Documentation=https://github.com/timpa0130/nvmeof-csi
+Wants=network-online.target
+After=network-online.target
+Before=nvmeof-csi-controller.service
+
+[Service]
+Type=oneshot
+# Stays active after success, so controller crash restarts do not download again.
+RemainAfterExit=yes
+EnvironmentFile=/etc/default/nvmeof-csi-controller
+ExecStart=/usr/bin/curl -fsSL --connect-timeout 10 --max-time 60 -o /usr/local/bin/nvmeof-csi.new ${NVMEOF_CSI_URL}
+ExecStart=/bin/chmod 0755 /usr/local/bin/nvmeof-csi.new
+ExecStart=/bin/mv -f /usr/local/bin/nvmeof-csi.new /usr/local/bin/nvmeof-csi
