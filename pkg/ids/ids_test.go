@@ -20,6 +20,26 @@ func TestVolumeIDRoundTrip(t *testing.T) {
 	}
 }
 
+func TestHostIdentity(t *testing.T) {
+	if got, want := HostNQN("worker-1"), NQNRoot+".host:worker-1"; got != want {
+		t.Fatalf("HostNQN = %q, want %q", got, want)
+	}
+	if _, ok := ParseNQN(HostNQN("worker-1")); ok {
+		t.Fatal("HostNQN parsed as a volume NQN")
+	}
+	id := HostID("worker-1")
+	if id != HostID("worker-1") {
+		t.Fatal("HostID is not stable")
+	}
+	if id == HostID("worker-2") {
+		t.Fatal("HostID collides across nodes")
+	}
+	parts := strings.Split(id, "-")
+	if len(id) != 36 || len(parts) != 5 || parts[2][0] != '8' {
+		t.Fatalf("HostID not a version 8 UUID: %q", id)
+	}
+}
+
 func TestDefaultNamespace(t *testing.T) {
 	if id := VolumeID("", "vol-a"); id != "default/vol-a" {
 		t.Fatalf("VolumeID with empty ns = %q", id)

@@ -1,6 +1,10 @@
 package ids
 
-import "strings"
+import (
+	"crypto/sha256"
+	"fmt"
+	"strings"
+)
 
 // Naming constants for the single-cluster stateless design. Everything
 // is derived deterministically from the volumeID, so no metadata store
@@ -84,6 +88,24 @@ func ValidNamespace(s string) bool {
 // ID. Names must not contain '/', which would break volume ID parsing.
 func ValidName(s string) bool {
 	return !strings.Contains(s, "/")
+}
+
+// HostNQN returns the initiator NQN for a node. The node connects with it
+// and the controller grants it, each deriving it from the CSI node ID, so
+// nodes need no host-specific NQN file and cloned hosts stay distinct. Its
+// root differs from NQNRoot, so it can never equal a volume NQN.
+func HostNQN(nodeID string) string {
+	return NQNRoot + ".host:" + nodeID
+}
+
+// HostID returns the NVMe host identifier (a UUID) paired with HostNQN.
+// The kernel initiator rejects one host NQN with two host IDs, and one
+// host ID with two host NQNs, so it must be stable per node.
+func HostID(nodeID string) string {
+	sum := sha256.Sum256([]byte(HostNQN(nodeID)))
+	sum[6] = sum[6]&0x0f | 0x80 // version 8: custom
+	sum[8] = sum[8]&0x3f | 0x80 // RFC 9562 variant
+	return fmt.Sprintf("%x-%x-%x-%x-%x", sum[0:4], sum[4:6], sum[6:8], sum[8:10], sum[10:16])
 }
 
 // Dataset returns the ZFS dataset for a namespace and PVC name.

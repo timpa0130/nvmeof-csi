@@ -12,20 +12,24 @@ what makes each step safe to retry. Components and naming are in
 ```mermaid
 flowchart LR
     PVC["PVC created"] --> CREATE["Create volume"]
-    CREATE --> STAGE["Stage on node"]
+    CREATE --> GRANT["Grant node"]
+    GRANT --> STAGE["Stage on node"]
     STAGE --> PUBLISH["Publish to pod"]
     PUBLISH --> UNPUB["Unpublish"]
     UNPUB --> UNSTAGE["Unstage"]
-    UNSTAGE --> DELETE["Delete volume"]
+    UNSTAGE --> REVOKE["Revoke node"]
+    REVOKE --> DELETE["Delete volume"]
 ```
 
 | Box | RPC | Runs on | Touches |
 | --- | --- | --- | --- |
 | Create volume | `CreateVolume` | controller | `zfs create`, nvmet subsystem / namespace / port link |
+| Grant node | `ControllerPublishVolume` | controller | nvmet `allowed_hosts` link for the node's host NQN |
 | Stage on node | `NodeStageVolume` | node | `nvme connect`, sysfs I/O cap, `mkfs` + mount (filesystem mode) |
 | Publish to pod | `NodePublishVolume` | node | bind mount into the pod's target path |
 | Unpublish | `NodeUnpublishVolume` | node | unmount target |
 | Unstage | `NodeUnstageVolume` | node | unmount staging (filesystem mode), `nvme disconnect` |
+| Revoke node | `ControllerUnpublishVolume` | controller | drop connections, remove the `allowed_hosts` link |
 | Delete volume | `DeleteVolume` | controller | nvmet teardown, `zfs destroy` |
 
 ## 1. Create
@@ -58,20 +62,26 @@ sequenceDiagram
 | derive names | volume ID, NQN, dataset (`pkg/ids`) |
 | zvol exists? | same `volsize` → return it (idempotent); different size → `AlreadyExists` |
 | create zvol | parents with `mountpoint=none`, then `zfs create -V <bytes> -o volblocksize=16K <dataset>`; waits for `/dev/zvol/<dataset>` (udev) |
-| subsystem, namespace, port link | `CreateSubsystem(nqn)`, `CreateNamespace(nqn, 1, /dev/zvol/...)`, `LinkSubsystemToPort(nqn)` on port `1` |
+| subsystem, namespace, port link | `CreateSubsystem(nqn)` with `attr_allow_any_host=0`, so no host can connect yet; `CreateNamespace(nqn, 1, /dev/zvol/...)`, `LinkSubsystemToPort(nqn)` on port `1` |
 | on any failure | `TeardownVolume(nqn)` + `DestroyVolume(dataset)`, then `Internal` — no half-built volume is left |
 
-## 2. Stage and publish
+## 2. Grant, stage and publish
 
-kubelet stages once per node, then publishes per pod. The node never
-constructs device names: it connects by NQN and finds the namespace's block
-devices in sysfs.
+A pod scheduled to a node creates a `VolumeAttachment`, and kubelet waits for it
+before staging. The grant is what lets the node connect. kubelet stages once
+per node, then publishes per pod. The node never constructs device names: it
+connects by NQN and finds the namespace's block devices in sysfs.
 
 ```mermaid
 sequenceDiagram
+    participant A as Attacher
+    participant C as Controller
     participant K as kubelet
     participant N as Node
     participant T as nvmet
+    A->>C: ControllerPublishVolume
+    C->>T: grant host
+    C-->>A: attached
     K->>N: NodeStageVolume
     N->>T: nvme connect
     N->>N: find namespace, cap I/O
@@ -86,7 +96,8 @@ sequenceDiagram
 
 | Step | Detail |
 | --- | --- |
-| nvme connect | `nvme connect -t tcp -n <nqn> -a <target-addr> -s <port>`; no-op when the namespace already exists; waits up to 10s for it |
+| grant host | `GrantHost(nqn, HostNQN(nodeID))`: `attr_allow_any_host=0`, `hosts/<host>`, `allowed_hosts/<host>` link; same node → success; other node → `FailedPrecondition`; no zvol → `NotFound` |
+| nvme connect | `nvme connect -t tcp -n <nqn> -a <target-addr> -s <port> --hostnqn <host> --hostid <id>`; no-op when the namespace already exists; waits up to 10s for it; fails if the node has no grant |
 | find namespace | `LookupNamespace(nqn)`: every `/sys/block/*` whose `device/subsysnqn` equals the NQN. Head = the entry without a `c` segment (`/dev/nvme1n1`); paths = `nvme<s>c<c>n1` |
 | cap I/O | `Namespace.CapIO()` lowers `queue/max_sectors_kb` to `1024` on head **and** paths; runs on every stage (and block publish) before any early return |
 | mkfs if blank, mount | `blkid` probe on the head; `mkfs.<fsType>` (default `ext4`) only when no filesystem; mount head → staging path |
@@ -102,18 +113,21 @@ Full analysis: `incident-nvmet-tcp-4mib-write-rejection.md`.
 ## 3. Teardown
 
 Reverse order of the above. Every step treats "already gone" as success, so
-kubelet and the provisioner can retry freely.
+kubelet and the sidecars can retry freely.
 
 ```mermaid
 sequenceDiagram
     participant K as kubelet
     participant N as Node
+    participant A as Attacher
     participant EP as Provisioner
     participant C as Controller
     K->>N: NodeUnpublishVolume
     N->>N: unmount target
     K->>N: NodeUnstageVolume
     N->>N: unmount staging, disconnect
+    A->>C: ControllerUnpublishVolume
+    C->>C: drop connections, revoke host
     EP->>C: DeleteVolume
     C->>C: nvmet teardown, destroy zvol
 ```
@@ -122,8 +136,40 @@ sequenceDiagram
 | --- | --- |
 | unmount target | tolerates `EINVAL` / `ENOENT` (not mounted) |
 | unmount staging, disconnect | unmount only when mounted (filesystem mode); `nvme disconnect -n <nqn>`; namespace gone → success |
-| nvmet teardown | `TeardownVolume(nqn)`: unlink port, remove namespace, remove subsystem |
+| drop connections, revoke host | `RevokeHost(nqn, host)`: only if `host` holds it, unlink the port (deletes its controllers) and remove the `allowed_hosts` link; then always restore the port link. Other subsystems are untouched. No subsystem → success |
+| nvmet teardown | `TeardownVolume(nqn)`: unlink port, remove `allowed_hosts` links, remove namespace, remove subsystem |
 | destroy zvol | `zfs destroy <dataset>`; parent datasets left in place; missing volume → success |
+
+## Moving between nodes
+
+Only one node can hold a volume. The new node's attach is refused until the old
+one is detached, so its pod waits in `ContainerCreating` with a multi-attach
+event instead of mounting the volume twice.
+
+```mermaid
+sequenceDiagram
+    participant O as Old node
+    participant K as Kubernetes
+    participant C as Controller
+    participant N as New node
+    K->>O: delete pod
+    O->>O: unpublish, unstage
+    O-->>K: volume not in use
+    K->>C: revoke old node
+    K->>C: grant new node
+    K->>N: stage, publish
+```
+
+| Case | When the old node is revoked |
+| --- | --- |
+| Drain, either workload type | once the old node reports the volume no longer in use |
+| Dead node | after the pod is gone (force delete, or out-of-service taint) and Kubernetes force-detaches; default wait 6 minutes |
+| Running but partitioned node | as for a dead node; the revoke drops its connection, so its I/O stops reaching the target |
+
+The revoke is the fence: a node cut off from the API server cannot be asked to
+unmount, but the target stops serving it regardless. Its initiator retries and
+is refused. Unflushed writes on a dead or fenced node are lost; the new node
+replays the ext4 journal.
 
 ## Recovery: reconcile on startup
 
@@ -139,10 +185,11 @@ untouched, so initiators keep their I/O across a controller restart.
 | `ValidateVolumeCapabilities` | zvol must exist (`NotFound` otherwise), then capability check |
 | `ListVolumes` | `zfs list -t volume`, with `volsize` per dataset |
 | `GetCapacity` | `zpool list -o free <pool>` |
-| `ControllerPublish/Unpublish` | no-op; attach happens at node stage |
 
 ## Manual end-to-end check
 
 `test/manual/e2e.sh` walks this whole lifecycle without Kubernetes, as root,
-using `csc` against the driver socket: probe → create → stage → publish →
-`dd` write/verify on the device → unpublish → unstage → delete → orphan check.
+using `csc` against the driver socket: probe → create → stage refused → grant →
+second node refused → stage → publish → `dd` write/verify on the device → revoke
+drops the connection → re-grant reconnects → unpublish → unstage → revoke →
+delete → orphan check.

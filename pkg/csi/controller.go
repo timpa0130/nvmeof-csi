@@ -4,10 +4,12 @@ package csi
 
 import (
 	"context"
+	"errors"
 	"strings"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/timpa0130/nvmeof-csi/pkg/ids"
+	"github.com/timpa0130/nvmeof-csi/pkg/nvmet"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -113,11 +115,53 @@ func (s *controllerServer) DeleteVolume(ctx context.Context, req *csi.DeleteVolu
 	return &csi.DeleteVolumeResponse{}, nil
 }
 
+// ControllerPublishVolume admits the node's host NQN to the volume's
+// subsystem. A volume held by another node is refused, which is what
+// enforces single-node access across nodes.
 func (s *controllerServer) ControllerPublishVolume(ctx context.Context, req *csi.ControllerPublishVolumeRequest) (*csi.ControllerPublishVolumeResponse, error) {
+	volumeID, err := requireVolumeID(req)
+	if err != nil {
+		return nil, err
+	}
+	nodeID := req.GetNodeId()
+	if nodeID == "" {
+		return nil, status.Error(codes.InvalidArgument, "node ID is required")
+	}
+	if err := validateCapabilities([]*csi.VolumeCapability{req.GetVolumeCapability()}); err != nil {
+		return nil, err
+	}
+	hostNQN := ids.HostNQN(nodeID)
+	if len(hostNQN) > ids.MaxNQN {
+		return nil, status.Errorf(codes.InvalidArgument, "derived host NQN too long (%d > %d bytes)", len(hostNQN), ids.MaxNQN)
+	}
+	ns, name := ids.SplitVolumeID(volumeID)
+	if !s.d.zfs.Exists(ids.Dataset(s.d.cfg.Pool, ns, name)) {
+		return nil, status.Errorf(codes.NotFound, "volume %s not found", volumeID)
+	}
+	if err := s.d.target.GrantHost(ids.NQN(volumeID), hostNQN); err != nil {
+		if errors.Is(err, nvmet.ErrHeldByOtherHost) {
+			return nil, status.Errorf(codes.FailedPrecondition, "publish volume %s to %s: %v", volumeID, nodeID, err)
+		}
+		return nil, status.Errorf(codes.Internal, "publish volume: %v", err)
+	}
 	return &csi.ControllerPublishVolumeResponse{}, nil
 }
 
+// ControllerUnpublishVolume revokes the node's access and drops any
+// connection it still has. An empty node ID revokes every node, per the
+// CSI spec.
 func (s *controllerServer) ControllerUnpublishVolume(ctx context.Context, req *csi.ControllerUnpublishVolumeRequest) (*csi.ControllerUnpublishVolumeResponse, error) {
+	volumeID, err := requireVolumeID(req)
+	if err != nil {
+		return nil, err
+	}
+	var hostNQN string
+	if nodeID := req.GetNodeId(); nodeID != "" {
+		hostNQN = ids.HostNQN(nodeID)
+	}
+	if err := s.d.target.RevokeHost(ids.NQN(volumeID), hostNQN); err != nil {
+		return nil, status.Errorf(codes.Internal, "unpublish volume: %v", err)
+	}
 	return &csi.ControllerUnpublishVolumeResponse{}, nil
 }
 
@@ -170,6 +214,11 @@ func (s *controllerServer) ControllerGetCapabilities(ctx context.Context, req *c
 			{
 				Type: &csi.ControllerServiceCapability_Rpc{
 					Rpc: &csi.ControllerServiceCapability_RPC{Type: csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME},
+				},
+			},
+			{
+				Type: &csi.ControllerServiceCapability_Rpc{
+					Rpc: &csi.ControllerServiceCapability_RPC{Type: csi.ControllerServiceCapability_RPC_PUBLISH_UNPUBLISH_VOLUME},
 				},
 			},
 		},

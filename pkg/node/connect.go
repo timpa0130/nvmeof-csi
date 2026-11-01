@@ -13,13 +13,13 @@ import (
 const deviceWaitTimeout = 10 * time.Second
 
 // Connect establishes an NVMe-oF/TCP connection to the subsystem nqn at
-// traddr:trsvcid and waits for the namespace device to appear.
-// Idempotent: an existing connection is a no-op.
-func Connect(ctx context.Context, nqn, traddr, trsvcid string) error {
+// traddr:trsvcid as the given host, and waits for the namespace device to
+// appear. Idempotent: an existing connection is a no-op.
+func Connect(ctx context.Context, nqn, traddr, trsvcid, hostNQN, hostID string) error {
 	if _, err := LookupNamespace(nqn); err == nil {
 		return nil
 	}
-	args := []string{"connect", "-t", "tcp", "-n", nqn, "-a", traddr}
+	args := []string{"connect", "-t", "tcp", "-n", nqn, "-a", traddr, "--hostnqn", hostNQN, "--hostid", hostID}
 	if trsvcid != "" {
 		args = append(args, "-s", trsvcid)
 	}

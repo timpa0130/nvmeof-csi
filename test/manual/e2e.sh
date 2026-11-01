@@ -2,8 +2,9 @@
 #
 # End-to-end test for the NVMe-oF/TCP CSI driver (block mode).
 #
-# Flow: identity -> create-volume -> node stage -> node publish -> dd ->
-# node unpublish -> node unstage -> delete-volume -> orphan check.
+# Flow: identity -> create-volume -> refused stage -> controller publish ->
+# node stage -> node publish -> dd -> fence and re-admit -> node unpublish ->
+# node unstage -> controller unpublish -> delete-volume -> orphan check.
 #
 # Run as root (or with a sudo-capable user). All CSI RPCs go through csc.
 set -euo pipefail
@@ -20,6 +21,8 @@ SOCKET="${CSI_SOCKET:-/run/csi/nvmeof-csi.sock}"
 TARGET_ADDR="${TARGET_ADDR:-192.168.1.86}"
 TRSVCID="${TRSVCID:-4420}"
 POOL="${POOL:-nvme}"
+# Must equal the driver's --node-id, which defaults to the hostname.
+NODE_ID="${NODE_ID:-$(hostname)}"
 
 NS="default"
 VOL="e2e-$(date +%s)"
@@ -34,6 +37,16 @@ STARTED_DAEMON=0
 
 log() { echo "--- $*"; }
 die() { echo "FAIL: $*" >&2; exit 1; }
+
+# Prints the state of the initiator controller connected to $NQN, if any.
+ctrl_state() {
+  local d
+  for d in /sys/class/nvme/nvme*; do
+    if [ "$(cat "$d/subsysnqn" 2>/dev/null)" = "$NQN" ]; then
+      cat "$d/state"
+    fi
+  done
+}
 
 # Build the driver if the binary is not present.
 if [ ! -x "$DRIVER_BIN" ]; then
@@ -70,6 +83,19 @@ log "identity: probe"
 log "controller: create-volume $VOLUME_ID"
 "${CSCV[@]}" controller create-volume --cap "$CAP" --req-bytes 67108864 --params "$PARAMS" "$VOL" >/dev/null
 
+log "node: stage is refused before controller publish"
+if "${CSCV[@]}" node stage --cap "$CAP" --staging-target-path "$STAGING" "$VOLUME_ID" >/dev/null 2>&1; then
+  die "stage succeeded without controller publish"
+fi
+
+log "controller: publish to $NODE_ID"
+"${CSCV[@]}" controller publish --cap "$CAP" --node-id "$NODE_ID" "$VOLUME_ID" >/dev/null
+
+log "controller: publish to another node is refused"
+if "${CSCV[@]}" controller publish --cap "$CAP" --node-id "other-$NODE_ID" "$VOLUME_ID" >/dev/null 2>&1; then
+  die "volume published to two nodes"
+fi
+
 log "node: stage"
 "${CSCV[@]}" node stage --cap "$CAP" --staging-target-path "$STAGING" "$VOLUME_ID" >/dev/null
 
@@ -85,6 +111,18 @@ dd if="$WORK/orig" of="$TARGET" bs=1M count=64 status=none
 dd if="$TARGET" of="$WORK/copy" bs=1M count=64 status=none
 cmp "$WORK/orig" "$WORK/copy" || die "data mismatch"
 
+log "controller: unpublish fences the connected node"
+"${CSCV[@]}" controller unpublish --node-id "$NODE_ID" "$VOLUME_ID" >/dev/null
+for _ in $(seq 1 15); do [ "$(ctrl_state)" != "live" ] && break; sleep 1; done
+[ "$(ctrl_state)" != "live" ] || die "controller still live after unpublish"
+sleep 12 # longer than the initiator's 10s reconnect delay
+[ "$(ctrl_state)" != "live" ] || die "fenced node reconnected"
+
+log "controller: re-publish lets the node reconnect"
+"${CSCV[@]}" controller publish --cap "$CAP" --node-id "$NODE_ID" "$VOLUME_ID" >/dev/null
+for _ in $(seq 1 30); do [ "$(ctrl_state)" = "live" ] && break; sleep 1; done
+[ "$(ctrl_state)" = "live" ] || die "controller not live after re-publish"
+
 log "node: unpublish"
 "${CSCV[@]}" node unpublish --target-path "$TARGET" "$VOLUME_ID" >/dev/null
 [ -e "$TARGET" ] && ! mountpoint -q "$TARGET" || die "target still mounted"
@@ -92,6 +130,9 @@ log "node: unpublish"
 log "node: unstage"
 "${CSCV[@]}" node unstage --staging-target-path "$STAGING" "$VOLUME_ID" >/dev/null
 nvme list-subsys -o json | grep -q "$NQN" && die "controller for $NQN still connected"
+
+log "controller: unpublish"
+"${CSCV[@]}" controller unpublish --node-id "$NODE_ID" "$VOLUME_ID" >/dev/null
 
 log "controller: delete-volume"
 "${CSCV[@]}" controller delete-volume "$VOLUME_ID" >/dev/null
