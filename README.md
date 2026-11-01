@@ -1,6 +1,6 @@
 # nvmeof-csi
 
-NVMe-oF/TCP CSI driver. Block mode. Stateless. Tested with csc (no Kubernetes).
+NVMe-oF/TCP CSI driver. Block and filesystem modes. Stateless. Tested with csc (no Kubernetes).
 
 ## Who is this for
 
@@ -154,6 +154,7 @@ csc controller delete-volume default/vol-a
 ```
 
 ## Scope (v1)
-- block mode only (no fs/mkfs), single cluster, nsid 1
+- block or filesystem (ext2/3/4, xfs; default ext4), `SINGLE_NODE_WRITER` only
+- single cluster, nsid 1
 - no snapshots/clones, expansion, multipath
 - names: `/` rejected everywhere; `.` rejected in namespace only
