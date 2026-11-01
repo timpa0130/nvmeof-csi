@@ -49,7 +49,8 @@ func TestRunServesOverTCP(t *testing.T) {
 
 	callCtx, callCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer callCancel()
-	resp, err := csi.NewIdentityClient(conn).Probe(callCtx, &csi.ProbeRequest{})
+	// Run opens the TCP listener in its goroutine, so wait for it to come up.
+	resp, err := csi.NewIdentityClient(conn).Probe(callCtx, &csi.ProbeRequest{}, grpc.WaitForReady(true))
 	if err != nil {
 		t.Fatalf("Probe over TCP: %v", err)
 	}
