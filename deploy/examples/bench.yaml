@@ -1,26 +1,15 @@
 # dd + fio benchmark for a volume from the nvmeof-csi StorageClass.
 #
-# A 10Gi RWO filesystem PVC mounted by a single-replica Deployment. On start
-# the pod installs fio, runs bench.sh once and then idles so it can be rerun.
-# All I/O is O_DIRECT so the pod's page cache is bypassed; reads can still be
-# served from the target's ZFS ARC.
+# A StatefulSet with one 10Gi RWO filesystem PVC per replica, each pod on its
+# own node. On start each pod installs fio, runs bench.sh once and then idles
+# so it can be rerun. All I/O is O_DIRECT so the pod's page cache is bypassed;
+# reads can still be served from the target's ZFS ARC.
 #
 #   kubectl apply -f deploy/examples/bench.yaml
-#   kubectl logs -f deploy/nvmeof-bench
-#   kubectl exec deploy/nvmeof-bench -- /bench/bench.sh            # rerun
-#   kubectl exec deploy/nvmeof-bench -- env RUNTIME=60 /bench/bench.sh
-#   kubectl delete -f deploy/examples/bench.yaml
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: nvmeof-bench
-spec:
-  storageClassName: nvmeof-csi
-  accessModes: ["ReadWriteOnce"]
-  resources:
-    requests:
-      storage: 10Gi
----
+#   kubectl logs -f -l app=nvmeof-bench --prefix
+#   kubectl exec nvmeof-bench-0 -- /bench/bench.sh                 # rerun
+#   kubectl exec nvmeof-bench-0 -- env RUNTIME=60 /bench/bench.sh
+#   kubectl delete -f deploy/examples/bench.yaml                   # PVCs too
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -68,14 +57,15 @@ data:
     rm -f "$file"
 ---
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: nvmeof-bench
 spec:
-  replicas: 1
-  # RWO volume: the old pod must release it before the new one stages it.
-  strategy:
-    type: Recreate
+  serviceName: nvmeof-bench
+  replicas: 3
+  podManagementPolicy: Parallel
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Delete
   selector:
     matchLabels:
       app: nvmeof-bench
@@ -84,6 +74,14 @@ spec:
       labels:
         app: nvmeof-bench
     spec:
+      # Pods stay Pending if replicas exceed the number of schedulable nodes.
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: nvmeof-bench
+              topologyKey: kubernetes.io/hostname
       containers:
         - name: bench
           image: debian:bookworm-slim
@@ -106,9 +104,6 @@ spec:
             - name: src
               mountPath: /src
       volumes:
-        - name: data
-          persistentVolumeClaim:
-            claimName: nvmeof-bench
         - name: script
           configMap:
             name: nvmeof-bench
@@ -118,3 +113,12 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 1200Mi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        storageClassName: nvmeof-csi
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi
