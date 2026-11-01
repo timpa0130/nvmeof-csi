@@ -6,7 +6,7 @@ NVMe-oF/TCP CSI driver. Block mode. Stateless. Tested with csc (no Kubernetes).
 
 Homelab Kubernetes clusters that need real block storage, but don't want to run a heavyweight operator stack just to get it.
 
-- **Rook** is great in every other aspect, but the resource footprint is too much for a homelab.
+- **Rook Ceph** is great in every other aspect, but the resource footprint is too much for a homelab.
 - **Rancher Longhorn** is not for me — it uses NFS under the hood and is about as heavy as Rook, but less feature-rich.
 - **local-path-provisioner** is great, but the data only lives on a single node — lose that node, lose the data.
 
