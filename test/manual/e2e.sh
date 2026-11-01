@@ -3,7 +3,7 @@
 # End-to-end test for the NVMe-oF/TCP CSI driver (block mode).
 #
 # Flow: identity -> create-volume -> refused stage -> controller publish ->
-# node stage -> node publish -> dd -> fence and re-admit -> node unpublish ->
+# node stage -> node publish -> dd -> fence, re-stage, verify -> node unpublish ->
 # node unstage -> controller unpublish -> delete-volume -> orphan check.
 #
 # Run as root (or with a sudo-capable user). All CSI RPCs go through csc.
@@ -115,13 +115,20 @@ log "controller: unpublish fences the connected node"
 "${CSCV[@]}" controller unpublish --node-id "$NODE_ID" "$VOLUME_ID" >/dev/null
 for _ in $(seq 1 15); do [ "$(ctrl_state)" != "live" ] && break; sleep 1; done
 [ "$(ctrl_state)" != "live" ] || die "controller still live after unpublish"
-sleep 12 # longer than the initiator's 10s reconnect delay
+# A refused reconnect carries do-not-retry: newer kernels remove the controller,
+# older ones keep retrying until ctrl_loss_tmo. Either way it must not be live.
+for _ in $(seq 1 20); do [ -z "$(ctrl_state)" ] && break; sleep 1; done
 [ "$(ctrl_state)" != "live" ] || die "fenced node reconnected"
+log "controller after fence: $(ctrl_state | grep . || echo removed)"
 
-log "controller: re-publish lets the node reconnect"
+log "node: a fenced node returns by staging again"
+"${CSCV[@]}" node unpublish --target-path "$TARGET" "$VOLUME_ID" >/dev/null
+"${CSCV[@]}" node unstage --staging-target-path "$STAGING" "$VOLUME_ID" >/dev/null
 "${CSCV[@]}" controller publish --cap "$CAP" --node-id "$NODE_ID" "$VOLUME_ID" >/dev/null
-for _ in $(seq 1 30); do [ "$(ctrl_state)" = "live" ] && break; sleep 1; done
-[ "$(ctrl_state)" = "live" ] || die "controller not live after re-publish"
+"${CSCV[@]}" node stage --cap "$CAP" --staging-target-path "$STAGING" "$VOLUME_ID" >/dev/null
+"${CSCV[@]}" node publish --cap "$CAP" --target-path "$TARGET" --staging-target-path "$STAGING" "$VOLUME_ID" >/dev/null
+dd if="$TARGET" of="$WORK/copy" bs=1M count=64 status=none
+cmp "$WORK/orig" "$WORK/copy" || die "data mismatch after fence"
 
 log "node: unpublish"
 "${CSCV[@]}" node unpublish --target-path "$TARGET" "$VOLUME_ID" >/dev/null
