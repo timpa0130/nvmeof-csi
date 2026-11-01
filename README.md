@@ -47,7 +47,12 @@ flowchart LR
 | device | `/dev/nvme<n>n1`, found by NQN (never hardcoded) |
 
 ## Requirements
-- Linux + kernel modules `nvmet_tcp` / `nvme_tcp`, configfs mounted
+- Storage host: Linux + kernel module `nvmet_tcp`, configfs mounted
+- Every worker node: kernel module `nvme_tcp` loaded on the host, since the node pod can't load it. Without it, staging fails with `Failed to scan topology: No such file or directory`:
+  ```
+  sudo modprobe nvme_tcp
+  echo nvme_tcp | sudo tee /etc/modules-load.d/nvme_tcp.conf
+  ```
 - `nvme` CLI, `zfs`/`zpool`
 - Go >= 1.26 (build)
 - `csc` (test only): `go install github.com/rexray/gocsi/csc@latest`
