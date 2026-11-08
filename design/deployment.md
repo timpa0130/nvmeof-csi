@@ -66,6 +66,9 @@ flowchart LR
 | `image.repository` / `tag` / `pullPolicy` | `ghcr.io/timpa0130/nvmeof-csi` / `latest` / `Always` |
 | `node.targetAddr` | `192.168.1.10` |
 | `*.port`, `*.pool` | `4420`, `nvme` |
+| `cluster` | `""`; the cluster ID passed to the node plugin, matching the controller's `NVMEOF_CSI_CLUSTER` |
+| `csi.pluginName` | `com.timpa0130.nvmeof-csi`; must differ per cluster if two clusters' node plugins land on the same nodes |
+
 
 ## Controller as a systemd service
 
@@ -108,6 +111,8 @@ flowchart LR
 | `--target-addr` | `NVMEOF_CSI_TARGET_ADDR=192.168.1.107` |
 | `--port` | `NVMEOF_CSI_PORT=4420` |
 | `--pool` | `NVMEOF_CSI_POOL=nvme` |
+| `--cluster` | `NVMEOF_CSI_CLUSTER=` (empty = single-cluster names) |
+| `--nvme-port` | `NVMEOF_CSI_NVME_PORT=1` |
 
 | Setting | Why |
 | --- | --- |
@@ -150,6 +155,61 @@ To run a binary installed by hand, stop the downloads:
 systemctl mask nvmeof-csi-upgrade
 ```
 
+## Sharing one pool and target host between clusters
+
+Several Kubernetes clusters can use one ZFS pool on one target host. Each gets
+its own controller service, nvmet port and slice of the pool; nothing is shared
+but the pool's space.
+
+On the target host, copy `nvmeof-csi-controller.service` to
+`nvmeof-csi-controller-<cluster>.service` and give the copy its own
+environment file, socket and ports (`Wants=` on the same upgrade service is
+fine, one binary serves all instances):
+
+| Line | cluster 1 | cluster 2 |
+| --- | --- | --- |
+| `EnvironmentFile=` | `/etc/default/nvmeof-csi-controller` | `/etc/default/nvmeof-csi-controller-c2` |
+| `RuntimeDirectory=` | `csi` | `csi-c2` |
+| `--socket=` | `/run/csi/nvmeof-csi.sock` | `/run/csi-c2/nvmeof-csi.sock` |
+
+and in the environment file:
+
+| Variable | cluster 1 | cluster 2 | Why |
+| --- | --- | --- | --- |
+| `NVMEOF_CSI_CLUSTER` | *(empty)* | `c2` | scopes datasets, NQNs and grants |
+| `NVMEOF_CSI_POOL` | `nvme` | `nvme` | the same pool |
+| `NVMEOF_CSI_NVME_PORT` | `1` | `2` | configfs `ports/<n>`, numbered by the kernel |
+| `NVMEOF_CSI_PORT` | `4420` | `4421` | `trsvcid`: the kernel refuses two ports on one `traddr` with the same `trsvcid` |
+| `NVMEOF_CSI_LISTEN` | `192.168.1.107:9090` | `192.168.1.107:9091` | the gRPC endpoint the chart's socat sidecar dials |
+
+Give the cluster its part of the pool. The dataset root is created by the first
+`CreateVolume`; creating it up front is what lets you set the quota first:
+
+```bash
+zfs create -o mountpoint=none nvme/c2
+zfs set quota=200G nvme/c2
+```
+
+`quota` (not `refquota`) because the cluster's zvols are descendants of that
+root, and `GetCapacity` reads `available` from it, so the cluster is scheduled
+against its own limit instead of the pool's free space.
+
+In Kubernetes, one release per cluster. `csi.pluginName` differs here because
+both clusters' node plugins write their socket under the same hostPath directory
+name on shared nodes:
+
+```bash
+helm install nvmeof-csi-c2 charts/nvmeof-csi -n nvmeof-csi-c2 --create-namespace \
+  --set cluster=c2 \
+  --set csi.pluginName=com.timpa0130.nvmeof-csi-c2 \
+  --set node.port=4421 \
+  --set provisioner.controllerAddr=192.168.1.107:9091
+```
+
+Adding a cluster ID to a deployment that already has volumes is a rename of
+every dataset and NQN, not a config change: do it before volumes exist, or
+migrate them by hand.
+
 ## Design notes
 
 - With the default `NVMEOF_CSI_URL` every reboot moves to the latest release,
@@ -167,7 +227,9 @@ systemctl mask nvmeof-csi-upgrade
 - Rebooting the target host empties in-memory configfs. On start the unit's
   `Reconcile` rebuilds every zvol's export and grant from the holder property on
   the zvol, without Kubernetes; initiators reconnect by themselves if the host is
-  back within about 10 minutes. See `volume-lifecycle.md` § Recovery.
+  back within about 10 minutes. See `volume-lifecycle.md` § Recovery. Each
+  cluster's controller does this only for its own dataset root and NQN root, so
+  the instances do not disturb one another.
 - The provisioner ships in the chart so deleting and reinstalling the
   release brings it back; before, a hand-applied provisioner was lost with
   the namespace and PVCs stayed `Pending`.
