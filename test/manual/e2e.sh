@@ -8,6 +8,10 @@
 # node unstage -> controller unpublish -> delete-volume -> orphan check.
 #
 # Run as root (or with a sudo-capable user). All CSI RPCs go through csc.
+#
+# One cluster's share of a pool is addressed by CLUSTER + NVME_PORT + TRSVCID,
+# so a second cluster sharing the same pool and target host is a second run of
+# this script: CLUSTER=c2 NVME_PORT=2 TRSVCID=4421 ./e2e.sh
 set -euo pipefail
 
 DRIVER_BIN="${DRIVER_BIN:-$(dirname "$0")/../../bin/nvmeof-csi}"
@@ -22,14 +26,18 @@ SOCKET="${CSI_SOCKET:-/run/csi/nvmeof-csi.sock}"
 TARGET_ADDR="${TARGET_ADDR:-192.168.1.86}"
 TRSVCID="${TRSVCID:-4420}"
 POOL="${POOL:-nvme}"
+# This cluster's ID and the nvmet configfs port it serves: both empty/1 keep
+# the single-cluster names and port.
+CLUSTER="${CLUSTER:-}"
+NVME_PORT="${NVME_PORT:-1}"
 # Must equal the driver's --node-id, which defaults to the hostname.
 NODE_ID="${NODE_ID:-$(hostname)}"
 
 NS="default"
 VOL="e2e-$(date +%s)"
 VOLUME_ID="${NS}/${VOL}"
-NQN="nqn.2026-08.io.example.nvmeof:${NS}.${VOL}"
-DATASET="${POOL}/${VOLUME_ID}"
+NQN="nqn.2026-08.io.example.nvmeof${CLUSTER:+.${CLUSTER}}:${NS}.${VOL}"
+DATASET="${POOL}${CLUSTER:+/${CLUSTER}}/${VOLUME_ID}"
 STAGING="/tmp/csi-e2e-staging"
 TARGET="/tmp/csi-e2e-device"
 WORK=/tmp/csi-e2e-work
@@ -57,7 +65,9 @@ fi
 
 start_driver() {
   log "starting driver"
-  setsid "$DRIVER_BIN" --target-addr "$TARGET_ADDR" --port "$TRSVCID" --pool "$POOL" \
+  DRIVER_ARGS=(--target-addr "$TARGET_ADDR" --port "$TRSVCID" --pool "$POOL" --nvme-port "$NVME_PORT")
+  if [ -n "$CLUSTER" ]; then DRIVER_ARGS+=(--cluster "$CLUSTER"); fi
+  setsid "$DRIVER_BIN" "${DRIVER_ARGS[@]}" \
     >>/tmp/csi-e2e-driver.log 2>&1 </dev/null &
   for _ in $(seq 1 30); do [ -S "$SOCKET" ] && break; sleep 1; done
   [ -S "$SOCKET" ] || die "driver socket $SOCKET not created"
@@ -138,7 +148,7 @@ cmp "$WORK/orig" "$WORK/copy" || die "data mismatch after fence"
 
 # A reboot empties configfs; do that to this volume with the driver stopped. It
 # needs this script's own driver, and a port with no other volumes to close.
-PORT_SUBS=/sys/kernel/config/nvmet/ports/1/subsystems
+PORT_SUBS=/sys/kernel/config/nvmet/ports/${NVME_PORT}/subsystems
 if [ "$STARTED_DAEMON" = 1 ] && [ "$(ls "$PORT_SUBS" | wc -l)" = 1 ]; then
   stop_and_wipe() {
     pkill -x nvmeof-csi

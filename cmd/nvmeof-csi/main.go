@@ -21,6 +21,8 @@ func main() {
 		targetAddr = flag.String("target-addr", "", "IP address initiators connect to (default: first non-loopback IPv4)")
 		port       = flag.String("port", csi.DefaultPort, "NVMe-oF/TCP port (trsvcid)")
 		pool       = flag.String("pool", "nvme", "ZFS pool for zvols")
+		cluster    = flag.String("cluster", "", "cluster ID: keeps this cluster's zvols, subsystems and grants apart from other clusters on the same pool and target host (empty: single-cluster names)")
+		nvmePort   = flag.String("nvme-port", csi.DefaultNVMePort, "nvmet configfs port number for this cluster (ports/<n>); must differ per process on one target host")
 		mode       = flag.String("mode", "all", "services to serve: all|controller|node")
 		nodeID     = flag.String("node-id", "", "K8s node ID for NodeGetInfo (default: os hostname)")
 	)
@@ -49,6 +51,8 @@ func main() {
 		TargetAddr: *targetAddr,
 		Port:       *port,
 		Pool:       *pool,
+		Cluster:    *cluster,
+		NVMePort:   *nvmePort,
 		NodeID:     nodeIDValue,
 		Mode:       csi.Mode(*mode),
 	})

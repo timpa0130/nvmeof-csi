@@ -30,6 +30,7 @@ spec:
             - --target-addr={{ .Values.node.targetAddr }}
             - --port={{ .Values.node.port }}
             - --pool={{ .Values.node.pool }}
+            - --cluster={{ .Values.cluster }}
             - --node-id=$(NODE_NAME)
           env:
             - name: NODE_NAME

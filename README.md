@@ -42,9 +42,11 @@ flowchart LR
 | field | derivation |
 |---|---|
 | volumeID | `<namespace>/<pvc>` (namespace defaults to `default`) |
-| nqn | `nqn.2026-08.io.example.nvmeof:<namespace>.<pvc>` |
-| dataset | `<pool>/<namespace>/<pvc>` |
+| nqn | `nqn.2026-08.io.example.nvmeof[.<cluster>]:<namespace>.<pvc>` |
+| dataset | `<pool>[/<cluster>]/<namespace>/<pvc>` |
 | device | `/dev/nvme<n>n1`, found by NQN (never hardcoded) |
+
+`--cluster` is what lets several Kubernetes clusters share one ZFS pool and one target host: it adds one dataset component and one NQN label, so two clusters can have a `default/vol-a` without colliding. Left empty, the names are the single-cluster ones above.
 
 ## Requirements
 - Storage host: Linux + kernel module `nvmet_tcp`, configfs mounted
@@ -79,6 +81,8 @@ sudo bin/nvmeof-csi \
   --target-addr 192.168.1.86 \
   --port 4420 \
   --pool nvme \
+  --cluster cluster1 \   # omit for the single-cluster names
+  --nvme-port 1 \        # nvmet configfs port number, one per process per host
   --mode all        # all | controller | node
   --node-id myhost  # optional; K8s node name for NodeGetInfo (default: os hostname)
 ```
@@ -119,6 +123,15 @@ helm install nvmeof-csi charts/nvmeof-csi \
   --set node.targetAddr=10.0.0.100
 ```
 
+### Several Kubernetes clusters on one pool
+
+Run one controller per cluster on the storage host, each with its own
+`--cluster`, gRPC `--listen`, nvmet `--nvme-port` and TCP `--port`, all on the
+same `--pool`; then install one Helm release per cluster with the matching
+`--set cluster=<id>`. `zfs set quota=<size> <pool>/<cluster>` is what bounds a
+cluster's capacity, and `GetCapacity` reports it. Details in
+[design/deployment.md](design/deployment.md).
+
 ## Test
 ```
 go test ./pkg/...
@@ -155,6 +168,6 @@ csc controller delete-volume default/vol-a
 
 ## Scope (v1)
 - block or filesystem (ext2/3/4, xfs; default ext4), `SINGLE_NODE_WRITER` only
-- single cluster, nsid 1
+- several Kubernetes clusters may share one pool and target host (`--cluster`); nsid 1
 - no snapshots/clones, expansion, multipath
-- names: `/` rejected everywhere; `.` rejected in namespace only
+- names: `/` rejected everywhere; `.` rejected in namespace only; cluster IDs reject `.`/`:` and the reserved `host`

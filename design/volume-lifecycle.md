@@ -60,11 +60,11 @@ sequenceDiagram
 | Step | Detail |
 | --- | --- |
 | validate | `validateCapabilities`; namespace/name from `csi.storage.k8s.io/pvc/namespace` / `pvc/name`, else `req.GetName()`; `ValidNamespace`/`ValidName`; `MaxNQN`, `MaxDataset` → `InvalidArgument` |
-| derive names | volume ID, NQN, dataset (`pkg/ids`) |
+| derive names | volume ID, NQN, dataset from `pkg/ids` `Scope{Pool, Cluster}` — the cluster ID adds a dataset component and an NQN label, so a sibling cluster sharing the pool cannot name the same object |
 | zvol exists? | same `volsize` → return it (idempotent); different size → `AlreadyExists` |
 | complete export | `exportVolume`, for a retry after an earlier attempt stopped short; failure → `Internal`, the zvol is kept |
 | create zvol | parents with `mountpoint=none`, then `zfs create -V <bytes> -o volblocksize=16K <dataset>`; waits for `/dev/zvol/<dataset>` (udev) |
-| subsystem, namespace, port link | `exportVolume` → `ExportVolume(nqn, /dev/zvol/...)`: `CreateSubsystem(nqn)` with `attr_allow_any_host=0`, so no host can connect yet; `CreateNamespace(nqn, 1, ...)`, which leaves an enabled namespace alone; `LinkSubsystemToPort(nqn)` on port `1` |
+| subsystem, namespace, port link | `exportVolume` → `ExportVolume(nqn, /dev/zvol/...)`: `CreateSubsystem(nqn)` with `attr_allow_any_host=0`, so no host can connect yet; `CreateNamespace(nqn, 1, ...)`, which leaves an enabled namespace alone; `LinkSubsystemToPort(nqn)` on this driver's `--nvme-port` |
 | on any failure | `TeardownVolume(nqn)` + `DestroyVolume(dataset)`, then `Internal` — no half-built volume is left |
 
 ## 2. Grant, stage and publish
@@ -206,8 +206,8 @@ sequenceDiagram
 | --- | --- |
 | reconnect, port closed | a port with no subsystem linked does not listen, so TCP connect fails; the initiator retries every `reconnect_delay` (10s) until `ctrl_loss_tmo` (10 minutes) |
 | ensure port | `EnsurePort`, in `main` before `Reconcile` |
-| tear down orphans | subsystems with our NQN root whose dataset no longer exists; `TeardownVolume(nqn)`; failure stops startup |
-| list zvols, read holders | `zfs.Volumes()`; failure stops startup. `ParseDataset` skips any zvol not named `<pool>/<namespace>/<name>`; `zfs get` of the holder property |
+| tear down orphans | subsystems with this cluster's NQN root whose dataset no longer exists; `TeardownVolume(nqn)`; failure stops startup. A sibling cluster's subsystems fail `ParseNQN` and are left alone |
+| list zvols, read holders | `zfs.Volumes()`; failure stops startup. `ParseDataset` skips any zvol outside this cluster's dataset root `<pool>[/<cluster>]`; `zfs get` of the holder property |
 | rebuild each, grant holder | `restoreVolume`: waits up to 5s for `/dev/zvol/<dataset>`, `PrepareVolume` with `NamespaceUUID(volumeID)`, `GrantHost` when a holder is recorded; failure is logged and the next zvol continues |
 | link all to port | `LinkSubsystemToPort` for every restored volume, as the last step |
 
@@ -234,8 +234,10 @@ kept.
   pods need one restart after the first reboot.
 - A bad zvol must not exit the process: that would keep every other volume down.
   `ControllerPublishVolume` retries its export.
-- Every zvol matching the naming scheme is exported, since the pool is dedicated
-  to the driver.
+- Every zvol under the cluster's dataset root is exported, since that part of
+  the pool is dedicated to the driver. With `--cluster` set the root is
+  `<pool>/<cluster>`, so the pool can hold several clusters' zvols without any
+  of them being exported, listed or torn down by the wrong controller.
 - Known gap: a volume `Reconcile` could not restore refuses its node once the port
   opens, so that node loses its controller and its pods must restart.
 - Known gap: if the target stays away longer than `ctrl_loss_tmo`, the node drops
@@ -248,8 +250,8 @@ kept.
 | RPC | Behavior |
 | --- | --- |
 | `ValidateVolumeCapabilities` | zvol must exist (`NotFound` otherwise), then capability check |
-| `ListVolumes` | `zfs list -t volume`, with `volsize` per dataset; zvols outside the naming scheme are skipped |
-| `GetCapacity` | `zpool list -o free <pool>` |
+| `ListVolumes` | `zfs list -t volume`, with `volsize` per dataset; zvols outside this cluster's dataset root are skipped |
+| `GetCapacity` | `zfs get available <dataset root>`: the pool, or the cluster's dataset under it, so a `quota` set there is the capacity the cluster is given (see `deployment.md`) |
 
 ## Manual end-to-end check
 

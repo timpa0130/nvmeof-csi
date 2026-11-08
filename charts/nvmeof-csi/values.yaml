@@ -29,3 +29,11 @@ node:
   targetAddr: 192.168.1.10
   port: "4420"
   pool: nvme
+
+# Cluster ID of this Kubernetes cluster, passed to every component: it keeps
+# this cluster's zvols (pool/<cluster>/...), subsystem NQNs and host grants
+# apart from other clusters sharing the same pool and target host. Empty is the
+# single-cluster layout. Set it to match NVMEOF_CSI_CLUSTER of the controller
+# on the target host, and give each cluster its own controller, port and
+# nvmet port number (design/deployment.md).
+cluster: ""

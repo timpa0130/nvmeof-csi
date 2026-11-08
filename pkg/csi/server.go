@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
@@ -23,6 +24,9 @@ const (
 	PluginName    = "com.timpa0130.nvmeof-csi"
 	PluginVersion = "1.0.0"
 	DefaultPort   = "4420"
+	// DefaultNVMePort is the configfs nvmet port number used by the single
+	// cluster layout; a second cluster on the same target host needs another.
+	DefaultNVMePort = "1"
 )
 
 // deviceWait bounds the wait for udev to create a zvol's device node.
@@ -44,12 +48,21 @@ type Config struct {
 	// CSI gRPC API on, for sidecars running on other hosts (e.g. an
 	// external-provisioner dialing a controller that lives off-cluster).
 	// Empty disables TCP serving.
-	Listen string
+	Listen     string
 	TargetAddr string
 	Port       string
 	Pool       string
-	NodeID     string
-	Mode       Mode
+	// Cluster separates this cluster's zvols, subsystems and host grants from
+	// those of other clusters sharing the same pool and target host. It lands
+	// in the dataset path and the NQN authority (see ids.Scope). Empty keeps
+	// the original single-cluster names.
+	Cluster string
+	// NVMePort is the nvmet configfs port number (ports/<NVMePort>) this
+	// process serves. Processes sharing one nvmet instance must differ; the
+	// kernel numbers ports, so it has to be numeric.
+	NVMePort string
+	NodeID   string
+	Mode     Mode
 }
 
 // zvolStore is the ZFS side of the driver; tests replace it.
@@ -76,6 +89,12 @@ type Driver struct {
 	zfs    zvolStore
 }
 
+// scope is the naming identity of this process: its pool and cluster. It is
+// derived from cfg so a Driver built anywhere names exactly what cfg says.
+func (d *Driver) scope() ids.Scope {
+	return ids.Scope{Pool: d.cfg.Pool, Cluster: d.cfg.Cluster}
+}
+
 // NewDriver builds a Driver.
 func NewDriver(cfg Config) (*Driver, error) {
 	if cfg.Mode == "" {
@@ -86,11 +105,22 @@ func NewDriver(cfg Config) (*Driver, error) {
 	default:
 		return nil, fmt.Errorf("invalid mode %q (all|controller|node)", cfg.Mode)
 	}
-	return &Driver{
+	if cfg.NVMePort == "" {
+		cfg.NVMePort = DefaultNVMePort
+	}
+	if _, err := strconv.ParseUint(cfg.NVMePort, 10, 16); err != nil {
+		return nil, fmt.Errorf("invalid nvme port %q: configfs port numbers are 0-65535", cfg.NVMePort)
+	}
+	if !ids.ValidCluster(cfg.Cluster) {
+		return nil, fmt.Errorf("invalid cluster %q: must not contain '/', '.' or ':', and must not be \"host\"", cfg.Cluster)
+	}
+	scope := ids.Scope{Pool: cfg.Pool, Cluster: cfg.Cluster}
+	d := &Driver{
 		cfg:    cfg,
-		target: nvmet.New(),
-		zfs:    zfs.New(cfg.Pool),
-	}, nil
+		target: nvmet.New(cfg.NVMePort, ""),
+		zfs:    zfs.New(cfg.Pool, scope.DatasetRoot()),
+	}
+	return d, nil
 }
 
 // EnsurePort creates the shared TCP target port.
@@ -101,37 +131,37 @@ func (d *Driver) EnsurePort() error {
 // exportVolume builds the nvmet export of an existing zvol. Idempotent;
 // a live export keeps its connections and grants.
 func (d *Driver) exportVolume(volumeID string) error {
-	ns, name := ids.SplitVolumeID(volumeID)
-	dataset := ids.Dataset(d.cfg.Pool, ns, name)
+	dataset := d.scope().Dataset(ids.SplitVolumeID(volumeID))
 	if err := d.zfs.WaitForDevice(dataset, deviceWait); err != nil {
 		return err
 	}
-	return d.target.ExportVolume(ids.NQN(volumeID), d.zfs.DevicePath(dataset), ids.NamespaceUUID(volumeID))
+	return d.target.ExportVolume(d.scope().NQN(volumeID), d.zfs.DevicePath(dataset), d.scope().NamespaceUUID(volumeID))
 }
 
 // restoreVolume rebuilds a zvol's export without its port link and admits its
 // recorded holder.
 func (d *Driver) restoreVolume(volumeID string) error {
-	ns, name := ids.SplitVolumeID(volumeID)
-	dataset := ids.Dataset(d.cfg.Pool, ns, name)
+	scope := d.scope()
+	dataset := scope.Dataset(ids.SplitVolumeID(volumeID))
 	if err := d.zfs.WaitForDevice(dataset, deviceWait); err != nil {
 		return err
 	}
-	nqn := ids.NQN(volumeID)
-	if err := d.target.PrepareVolume(nqn, d.zfs.DevicePath(dataset), ids.NamespaceUUID(volumeID)); err != nil {
+	nqn := scope.NQN(volumeID)
+	if err := d.target.PrepareVolume(nqn, d.zfs.DevicePath(dataset), scope.NamespaceUUID(volumeID)); err != nil {
 		return err
 	}
 	holder, err := d.zfs.Holder(dataset)
 	if err != nil || holder == "" {
 		return err
 	}
-	return d.target.GrantHost(nqn, ids.HostNQN(holder))
+	return d.target.GrantHost(nqn, scope.HostNQN(holder))
 }
 
-// Reconcile makes configfs match the pool. configfs is in-memory, so it
-// tears down subsystems that carry our NQN root but whose zvol no longer
-// exists, and rebuilds every zvol's export and grant after a reboot of this
-// host emptied it. Foreign subsystems and datasets are left alone.
+// Reconcile makes configfs match this cluster's dataset root. configfs is
+// in-memory, so it tears down subsystems that carry our NQN root but whose
+// zvol no longer exists, and rebuilds every zvol's export and grant after a
+// reboot of this host emptied it. Foreign subsystems and datasets, other
+// clusters' included, are left alone.
 //
 // Port links come last and together. An initiator refused with do-not-retry
 // removes its controller for good, which would cost a running pod its volume.
@@ -145,12 +175,11 @@ func (d *Driver) Reconcile() error {
 		return err
 	}
 	for _, nqn := range subs {
-		volumeID, ok := ids.ParseNQN(nqn)
+		volumeID, ok := d.scope().ParseNQN(nqn)
 		if !ok {
-			continue // not ours
+			continue // not ours, another cluster's included
 		}
-		ns, name := ids.SplitVolumeID(volumeID)
-		dataset := ids.Dataset(d.cfg.Pool, ns, name)
+		dataset := d.scope().Dataset(ids.SplitVolumeID(volumeID))
 		if d.zfs.Exists(dataset) {
 			continue
 		}
@@ -166,7 +195,7 @@ func (d *Driver) Reconcile() error {
 	}
 	var restored []string
 	for _, dataset := range datasets {
-		volumeID, ok := ids.ParseDataset(d.cfg.Pool, dataset)
+		volumeID, ok := d.scope().ParseDataset(dataset)
 		if !ok {
 			continue // not ours
 		}
@@ -174,7 +203,7 @@ func (d *Driver) Reconcile() error {
 			log.Printf("reconcile: restore %s: %v", volumeID, err)
 			continue
 		}
-		restored = append(restored, ids.NQN(volumeID))
+		restored = append(restored, d.scope().NQN(volumeID))
 	}
 	for _, nqn := range restored {
 		if err := d.target.LinkSubsystemToPort(nqn); err != nil {

@@ -93,7 +93,7 @@ func newReconcileFixture(t *testing.T, vols ...string) *reconcileFixture {
 	for _, v := range vols {
 		z.vols[v] = 1 << 30
 	}
-	d := &Driver{cfg: Config{Pool: "nvme", TargetAddr: "192.0.2.1", Port: "4420"}, target: nvmet.New(root), zfs: z}
+	d := &Driver{cfg: Config{Pool: "nvme", TargetAddr: "192.0.2.1", Port: "4420"}, target: nvmet.New("1", root), zfs: z}
 	return &reconcileFixture{t: t, root: root, zfs: z, d: d, ctrl: &controllerServer{d: d}}
 }
 
@@ -136,13 +136,13 @@ func (f *reconcileFixture) published() map[string][]string {
 	out := map[string][]string{}
 	for _, e := range resp.GetEntries() {
 		volumeID := e.GetVolume().GetVolumeId()
-		hosts, err := f.d.target.AllowedHosts(ids.NQN(volumeID))
+		hosts, err := f.d.target.AllowedHosts(f.d.scope().NQN(volumeID))
 		if err != nil {
 			f.t.Fatalf("AllowedHosts: %v", err)
 		}
 		var nodes []string
 		for _, host := range hosts {
-			nodes = append(nodes, strings.TrimPrefix(host, ids.HostNQN("")))
+			nodes = append(nodes, strings.TrimPrefix(host, f.d.scope().HostNQN("")))
 		}
 		out[volumeID] = nodes
 	}
@@ -151,7 +151,7 @@ func (f *reconcileFixture) published() map[string][]string {
 
 func (f *reconcileFixture) namespaceUUID(volumeID string) string {
 	f.t.Helper()
-	got, err := os.ReadFile(filepath.Join(f.root, "subsystems", ids.NQN(volumeID), "namespaces", "1", "device_uuid"))
+	got, err := os.ReadFile(filepath.Join(f.root, "subsystems", f.d.scope().NQN(volumeID), "namespaces", "1", "device_uuid"))
 	if err != nil {
 		f.t.Fatalf("read device_uuid: %v", err)
 	}
@@ -159,7 +159,7 @@ func (f *reconcileFixture) namespaceUUID(volumeID string) string {
 }
 
 func (f *reconcileFixture) exported(volumeID string) bool {
-	nqn := ids.NQN(volumeID)
+	nqn := f.d.scope().NQN(volumeID)
 	enable, err := os.ReadFile(filepath.Join(f.root, "subsystems", nqn, "namespaces", "1", "enable"))
 	if err != nil || string(enable) != "1\n" {
 		return false
@@ -219,7 +219,7 @@ func TestReconcileLinksPortLast(t *testing.T) {
 			return
 		}
 		checked = true
-		hosts, err := f.d.target.AllowedHosts(ids.NQN("default/a"))
+		hosts, err := f.d.target.AllowedHosts(f.d.scope().NQN("default/a"))
 		if err != nil || len(hosts) != 1 {
 			t.Fatalf("earlier volume's grant while restoring = %v, %v", hosts, err)
 		}
@@ -319,7 +319,7 @@ func TestReconcileTearsDownOrphan(t *testing.T) {
 		t.Fatal(err)
 	}
 	slices.Sort(subs)
-	want := []string{foreign, ids.NQN("default/a")}
+	want := []string{foreign, f.d.scope().NQN("default/a")}
 	slices.Sort(want)
 	if !slices.Equal(subs, want) {
 		t.Fatalf("subsystems = %v, want %v", subs, want)
@@ -333,7 +333,7 @@ func TestReconcileSkipsForeignZvols(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{ids.NQN("default/a")}; !slices.Equal(subs, want) {
+	if want := []string{f.d.scope().NQN("default/a")}; !slices.Equal(subs, want) {
 		t.Fatalf("subsystems = %v, want %v", subs, want)
 	}
 	if got, want := f.published(), map[string][]string{"default/a": nil}; !reflect.DeepEqual(got, want) {
@@ -393,5 +393,177 @@ func TestCreateVolumeIdempotentReexports(t *testing.T) {
 	}
 	if !f.exported("default/a") {
 		t.Fatal("idempotent CreateVolume did not export")
+	}
+}
+
+// portLinks lists the subsystems linked to one configfs port.
+func portLinks(t *testing.T, root, portID string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(root, "ports", portID, "subsystems"))
+	if err != nil {
+		t.Fatalf("read port %s: %v", portID, err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	slices.Sort(names)
+	return names
+}
+
+func deviceUUID(t *testing.T, root, nqn string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(root, "subsystems", nqn, "namespaces", "1", "device_uuid"))
+	if err != nil {
+		t.Fatalf("read device_uuid of %s: %v", nqn, err)
+	}
+	return strings.TrimSpace(string(b))
+}
+
+// TestSiblingClustersOnOnePool covers the case the cluster ID exists for: two
+// clusters sharing one ZFS pool and one nvmet target. Neither driver may export,
+// list, grant or remove the other's volumes, and the same namespace/PVC name in
+// both clusters must not become the same subsystem.
+func TestSiblingClustersOnOnePool(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "nvmet")
+	// One pool holding both clusters: what `zfs list` reports to either driver.
+	z := &fakeZFS{
+		vols: map[string]int64{
+			"nvme/c1/default/a":    1 << 30,
+			"nvme/c1/default/gone": 1 << 30, // deleted from the pool later on
+			"nvme/c2/default/a":    1 << 30, // same volume ID as cluster c1
+			"nvme/c2/team/b":       1 << 30, // only in cluster c2
+		},
+		noDevice: map[string]bool{},
+		holders:  map[string]string{},
+	}
+	scopeOf := func(cluster string) ids.Scope {
+		return ids.Scope{Pool: "nvme", Cluster: cluster}
+	}
+	drivers := map[string]*Driver{}
+	ctrls := map[string]*controllerServer{}
+	for cluster, portID := range map[string]string{"c1": "1", "c2": "2"} {
+		d := &Driver{
+			cfg:    Config{Pool: "nvme", Cluster: cluster, TargetAddr: "192.0.2.1", Port: "4420", NVMePort: portID},
+			target: nvmet.New(portID, root),
+			zfs:    z,
+		}
+		drivers[cluster] = d
+		ctrls[cluster] = &controllerServer{d: d}
+	}
+	start := func() {
+		t.Helper()
+		for _, d := range drivers {
+			if err := d.EnsurePort(); err != nil {
+				t.Fatalf("EnsurePort: %v", err)
+			}
+			if err := d.Reconcile(); err != nil {
+				t.Fatalf("Reconcile: %v", err)
+			}
+		}
+	}
+	publish := func(cluster, volumeID, nodeID string) error {
+		t.Helper()
+		_, err := ctrls[cluster].ControllerPublishVolume(context.Background(), &csi.ControllerPublishVolumeRequest{
+			VolumeId: volumeID,
+			NodeId:   nodeID,
+			VolumeCapability: &csi.VolumeCapability{
+				AccessType: &csi.VolumeCapability_Block{Block: &csi.VolumeCapability_BlockVolume{}},
+				AccessMode: &csi.VolumeCapability_AccessMode{Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER},
+			},
+		})
+		return err
+	}
+	listVolumeIDs := func(cluster string) []string {
+		t.Helper()
+		resp, err := ctrls[cluster].ListVolumes(context.Background(), &csi.ListVolumesRequest{})
+		if err != nil {
+			t.Fatalf("ListVolumes: %v", err)
+		}
+		var out []string
+		for _, e := range resp.GetEntries() {
+			out = append(out, e.GetVolume().GetVolumeId())
+		}
+		slices.Sort(out)
+		return out
+	}
+	start()
+
+	// Each cluster's port links only its own subsystems.
+	sorted := func(ns ...string) []string {
+		slices.Sort(ns)
+		return ns
+	}
+	want1 := sorted(scopeOf("c1").NQN("default/a"), scopeOf("c1").NQN("default/gone"))
+	if got := portLinks(t, root, "1"); !slices.Equal(got, want1) {
+		t.Fatalf("cluster 1 port links = %v, want %v", got, want1)
+	}
+	want2 := sorted(scopeOf("c2").NQN("default/a"), scopeOf("c2").NQN("team/b"))
+	if got := portLinks(t, root, "2"); !slices.Equal(got, want2) {
+		t.Fatalf("cluster 2 port links = %v, want %v", got, want2)
+	}
+
+	// The same volume ID in both clusters is two namespaces with two UUIDs.
+	u1 := deviceUUID(t, root, scopeOf("c1").NQN("default/a"))
+	u2 := deviceUUID(t, root, scopeOf("c2").NQN("default/a"))
+	if u1 == u2 {
+		t.Fatalf("identical volume IDs share namespace UUID %q", u1)
+	}
+
+	// ListVolumes of each cluster shows only its own datasets.
+	if got, want := listVolumeIDs("c1"), []string{"default/a", "default/gone"}; !slices.Equal(got, want) {
+		t.Fatalf("cluster 1 ListVolumes = %v, want %v", got, want)
+	}
+	if got, want := listVolumeIDs("c2"), []string{"default/a", "team/b"}; !slices.Equal(got, want) {
+		t.Fatalf("cluster 2 ListVolumes = %v, want %v", got, want)
+	}
+
+	// A volume of one cluster is not addressable through the other's controller.
+	if err := publish("c1", "team/b", "node-1"); status.Code(err) != codes.NotFound {
+		t.Fatalf("cluster 1 published cluster 2's volume: %v", err)
+	}
+
+	// A grant is scoped to the cluster: the same node ID is a different host.
+	if err := publish("c1", "default/a", "node-1"); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	hosts, err := drivers["c1"].target.AllowedHosts(scopeOf("c1").NQN("default/a"))
+	if err != nil || !slices.Equal(hosts, []string{scopeOf("c1").HostNQN("node-1")}) {
+		t.Fatalf("cluster 1 grants = %v, %v", hosts, err)
+	}
+	otherHosts, err := drivers["c2"].target.AllowedHosts(scopeOf("c2").NQN("default/a"))
+	if err != nil || len(otherHosts) != 0 {
+		t.Fatalf("cluster 2's same-named volume grants = %v, %v", otherHosts, err)
+	}
+
+	// A deleted zvol removes its own subsystem and nothing else.
+	delete(z.vols, "nvme/c1/default/gone")
+	start()
+	subs, err := drivers["c2"].target.ListSubsystems()
+	if err != nil {
+		t.Fatal(err)
+	}
+	surviving := sorted(append([]string{scopeOf("c1").NQN("default/a")}, want2...)...)
+	if !slices.Equal(subs, surviving) {
+		t.Fatalf("subsystems after deleting cluster 1's volume = %v, want %v", subs, surviving)
+	}
+	if got := portLinks(t, root, "1"); !slices.Equal(got, []string{scopeOf("c1").NQN("default/a")}) {
+		t.Fatalf("cluster 1 port links after delete = %v", got)
+	}
+
+	// A target host reboot rebuilds both clusters, each with its own grant.
+	if err := os.RemoveAll(root); err != nil {
+		t.Fatal(err)
+	}
+	start()
+	if got, want := deviceUUID(t, root, scopeOf("c1").NQN("default/a")), u1; got != want {
+		t.Fatalf("namespace UUID after reboot = %q, want %q", got, want)
+	}
+	hosts, err = drivers["c1"].target.AllowedHosts(scopeOf("c1").NQN("default/a"))
+	if err != nil || !slices.Equal(hosts, []string{scopeOf("c1").HostNQN("node-1")}) {
+		t.Fatalf("cluster 1 grants after reboot = %v, %v", hosts, err)
+	}
+	if hosts, err := drivers["c2"].target.AllowedHosts(scopeOf("c2").NQN("default/a")); err != nil || len(hosts) != 0 {
+		t.Fatalf("cluster 2 gained a grant across reboot: %v, %v", hosts, err)
 	}
 }

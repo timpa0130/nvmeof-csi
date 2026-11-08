@@ -18,7 +18,7 @@ func TestNvmetLifecycle(t *testing.T) {
 	os.MkdirAll(filepath.Join(root, "ports"), 0o755)
 	os.MkdirAll(filepath.Join(root, "subsystems"), 0o755)
 
-	tgt := New(root)
+	tgt := New("1", root)
 	nqn := "nqn.2014-08.org.nvmexpress:uuid:test-1"
 
 	if err := tgt.EnsurePort("192.168.1.86", "4420"); err != nil {
@@ -74,7 +74,7 @@ func TestTeardownPartialState(t *testing.T) {
 	os.MkdirAll(filepath.Join(root, "ports"), 0o755)
 	os.MkdirAll(filepath.Join(root, "subsystems"), 0o755)
 
-	tgt := New(root)
+	tgt := New("1", root)
 	// Create a subsystem but no namespace at all.
 	if err := tgt.CreateSubsystem("nqn.2014-08.org.nvmexpress:uuid:partial"); err != nil {
 		t.Fatalf("CreateSubsystem: %v", err)
@@ -88,7 +88,7 @@ func TestTeardownPartialState(t *testing.T) {
 // teardown of a subsystem that still has a holder.
 func TestHostAccess(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "nvmet")
-	tgt := New(root)
+	tgt := New("1", root)
 	nqn := "nqn.2014-08.org.nvmexpress:uuid:acl"
 	hostA, hostB := "nqn.host:a", "nqn.host:b"
 
@@ -172,7 +172,7 @@ func TestHostAccess(t *testing.T) {
 // re-export of a live volume, which must keep its device and grant.
 func TestExportVolume(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "nvmet")
-	tgt := New(root)
+	tgt := New("1", root)
 	nqn := "nqn.2014-08.org.nvmexpress:uuid:export"
 	host := "nqn.host:a"
 	nsDir := filepath.Join(root, "subsystems", nqn, "namespaces", "1")
@@ -232,12 +232,66 @@ func TestExportVolume(t *testing.T) {
 }
 
 func TestListSubsystemsMissingRoot(t *testing.T) {
-	tgt := New(filepath.Join(t.TempDir(), "no", "nvmet"))
+	tgt := New("1", filepath.Join(t.TempDir(), "no", "nvmet"))
 	subs, err := tgt.ListSubsystems()
 	if err != nil {
 		t.Fatalf("ListSubsystems on missing root: %v", err)
 	}
 	if len(subs) != 0 {
 		t.Fatalf("expected empty, got %v", subs)
+	}
+}
+
+// TestPortsAreIndependent covers two drivers sharing one nvmet instance, one
+// per cluster: each serves its own configfs port, a subsystem is reachable
+// only through its own port, and tearing one down leaves the other's link.
+func TestPortsAreIndependent(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "nvmet")
+	os.MkdirAll(filepath.Join(root, "ports"), 0o755)
+	os.MkdirAll(filepath.Join(root, "subsystems"), 0o755)
+
+	c1, c2 := New("1", root), New("2", root)
+	if err := c1.EnsurePort("192.0.2.1", "4420"); err != nil {
+		t.Fatalf("cluster 1 EnsurePort: %v", err)
+	}
+	if err := c2.EnsurePort("192.0.2.1", "4421"); err != nil {
+		t.Fatalf("cluster 2 EnsurePort: %v", err)
+	}
+
+	const nqn1 = "nqn.2026-08.io.example.nvmeof.c1:default.a"
+	const nqn2 = "nqn.2026-08.io.example.nvmeof.c2:default.a"
+	for _, tc := range []struct {
+		tgt *Target
+		nqn string
+	}{{c1, nqn1}, {c2, nqn2}} {
+		if err := tc.tgt.CreateSubsystem(tc.nqn); err != nil {
+			t.Fatalf("CreateSubsystem %s: %v", tc.nqn, err)
+		}
+		if err := tc.tgt.LinkSubsystemToPort(tc.nqn); err != nil {
+			t.Fatalf("LinkSubsystemToPort %s: %v", tc.nqn, err)
+		}
+	}
+
+	for _, want := range []struct{ dir, nqn string }{{"1", nqn1}, {"2", nqn2}} {
+		entries, err := os.ReadDir(filepath.Join(root, "ports", want.dir, "subsystems"))
+		if err != nil {
+			t.Fatalf("read port %s: %v", want.dir, err)
+		}
+		if len(entries) != 1 || entries[0].Name() != want.nqn {
+			t.Fatalf("port %s links %v, want just %s", want.dir, entries, want.nqn)
+		}
+	}
+
+	if err := c1.TeardownVolume(nqn1); err != nil {
+		t.Fatalf("TeardownVolume: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "ports", "2", "subsystems", nqn2)); err != nil {
+		t.Fatalf("cluster 2's port link was removed with cluster 1's volume: %v", err)
+	}
+
+	// One port cannot be reconfigured under a running driver: that is what
+	// refuses a second cluster the first cluster's port number.
+	if err := c1.EnsurePort("192.0.2.1", "4421"); err == nil {
+		t.Fatal("EnsurePort accepted a different trsvcid on port 1")
 	}
 }
