@@ -51,3 +51,8 @@ jobs:
 
       - name: Run e2e
         run: sudo env CSC="$(go env GOPATH)/bin/csc" TARGET_ADDR=127.0.0.1 POOL=nvme TRSVCID=4420 ./test/manual/e2e.sh
+
+      - name: Run e2e as a second cluster on the same pool
+        # Same pool, same nvmet target, different cluster ID, configfs port and
+        # trsvcid: nothing of cluster 1's naming may leak into cluster 2's.
+        run: sudo env CSC="$(go env GOPATH)/bin/csc" TARGET_ADDR=127.0.0.1 POOL=nvme CLUSTER=c2 NVME_PORT=2 TRSVCID=4421 ./test/manual/e2e.sh
