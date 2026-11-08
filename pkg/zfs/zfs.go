@@ -14,14 +14,18 @@ import (
 // holderProperty is the ZFS user property recording which node holds a zvol.
 const holderProperty = "com.timpa0130.nvmeof-csi:holder"
 
-// ZFS wraps the `zfs` command-line tool.
+// ZFS wraps the `zfs` command-line tool on behalf of one cluster. Pool is the
+// ZFS pool; Root is the dataset under it that holds this cluster's zvols, and
+// the dataset a per-cluster quota is set on. Root equals Pool for the
+// single-cluster layout.
 type ZFS struct {
 	Pool string
+	Root string
 }
 
-// New returns a ZFS helper targeting the given pool.
-func New(pool string) *ZFS {
-	return &ZFS{Pool: pool}
+// New returns a ZFS helper for one cluster's pool and dataset root.
+func New(pool, root string) *ZFS {
+	return &ZFS{Pool: pool, Root: root}
 }
 
 // CreateVolume creates a zvol at dataset with the given size in bytes
@@ -85,7 +89,9 @@ func (z *ZFS) VolSize(dataset string) (int64, error) {
 	return size, nil
 }
 
-// Volumes returns the zvol dataset names under this pool.
+// Volumes returns the zvol dataset names under this cluster's root. A
+// sibling cluster's zvols are not listed, so they are never exported, restored
+// or removed by this driver.
 func (z *ZFS) Volumes() ([]string, error) {
 	cmd := exec.Command("zfs", "list", "-t", "volume", "-H", "-o", "name")
 	out, err := cmd.CombinedOutput()
@@ -98,7 +104,7 @@ func (z *ZFS) Volumes() ([]string, error) {
 		if line == "" {
 			continue
 		}
-		if strings.HasPrefix(line, z.Pool+"/") {
+		if strings.HasPrefix(line, z.Root+"/") {
 			vols = append(vols, line)
 		}
 	}
@@ -139,16 +145,25 @@ func (z *ZFS) ClearHolder(dataset string) error {
 	return nil
 }
 
-// FreeBytes returns the free space available on the pool, in bytes.
+// FreeBytes returns the bytes available to this cluster's volumes. It is read
+// from the dataset root, so a quota set there (zfs set quota=... nvme/<cluster>)
+// bounds what the cluster advertises while sharing a pool; quota, not refquota,
+// because this cluster's zvols are descendants of that root. Without a quota the
+// pool's own free space is reported. A root that does not exist yet, before the
+// first volume, falls back to the pool.
 func (z *ZFS) FreeBytes() (int64, error) {
-	cmd := exec.Command("zpool", "list", "-H", "-p", "-o", "free", z.Pool)
+	dataset := z.Root
+	if dataset != z.Pool && !z.existsDataset(dataset) {
+		dataset = z.Pool
+	}
+	cmd := exec.Command("zfs", "get", "-H", "-p", "-o", "value", "available", dataset)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return 0, fmt.Errorf("zpool list %s: %w (%s)", z.Pool, err, out)
+		return 0, fmt.Errorf("zfs get available %s: %w (%s)", dataset, err, out)
 	}
 	var free int64
 	if _, err := fmt.Sscanf(string(out), "%d", &free); err != nil {
-		return 0, fmt.Errorf("parse zpool free: %w", err)
+		return 0, fmt.Errorf("parse available %s: %w", dataset, err)
 	}
 	return free, nil
 }

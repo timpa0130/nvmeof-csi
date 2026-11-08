@@ -15,7 +15,6 @@ import (
 // Configfs root where nvmet exposes its tree.
 const (
 	configfsRoot = "/sys/kernel/config/nvmet"
-	portID       = "1"
 	nsID         = "1"
 )
 
@@ -28,19 +27,23 @@ var ErrNoSubsystem = errors.New("subsystem not found")
 // Target manipulates the in-memory nvmet configfs tree.
 type Target struct {
 	root string
+	// portID is the configfs port (ports/<portID>) this process serves. The
+	// kernel numbers ports, so processes sharing one nvmet instance, one per
+	// cluster, need distinct ones.
+	portID string
 	// aclMu makes GrantHost's check-then-link atomic, so two concurrent
 	// grants cannot both win a subsystem.
 	aclMu sync.Mutex
 }
 
-// New returns a Target rooted at the nvmet configfs dir. A non-empty
-// override is used by tests to point at a scratch dir.
-func New(root ...string) *Target {
-	r := configfsRoot
-	if len(root) > 0 && root[0] != "" {
-		r = root[0]
+// New returns a Target that serves configfs port portID under the nvmet
+// configfs tree rooted at root; the real configfs path is selected when it is
+// empty, so tests pass a scratch dir.
+func New(portID, root string) *Target {
+	if root == "" {
+		root = configfsRoot
 	}
-	return &Target{root: r}
+	return &Target{root: root, portID: portID}
 }
 
 // Available reports whether the nvmet configfs tree exists (i.e. the
@@ -50,11 +53,11 @@ func Available() bool {
 	return err == nil && st.IsDir()
 }
 
-// EnsurePort creates the shared TCP port and (re)writes its address
+// EnsurePort creates this target's TCP port and (re)writes its address
 // attributes. Idempotent: attributes are only written when unset, since
 // configfs refuses to rewrite them once the port is active.
 func (t *Target) EnsurePort(traddr, trsvcid string) error {
-	portDir := filepath.Join(t.root, "ports", portID)
+	portDir := filepath.Join(t.root, "ports", t.portID)
 	if err := os.MkdirAll(portDir, 0o755); err != nil {
 		return fmt.Errorf("mkdir port: %w", err)
 	}
@@ -190,7 +193,7 @@ func (t *Target) AllowedHosts(nqn string) ([]string, error) {
 	return out, nil
 }
 
-// ExportVolume builds the volume's single-namespace export on the shared
+// ExportVolume builds the volume's single-namespace export on this target's
 // port. Idempotent and safe on a live export: it completes whatever is
 // missing, such as after a reboot emptied configfs, and keeps connections
 // and grants.
@@ -238,7 +241,7 @@ func (t *Target) CreateNamespace(nqn string, nsid int32, devicePath, nsUUID stri
 // LinkSubsystemToPort symlinks ports/<portID>/subsystems/<nqn> to the
 // subsystem. Idempotent.
 func (t *Target) LinkSubsystemToPort(nqn string) error {
-	portSubs := filepath.Join(t.root, "ports", portID, "subsystems")
+	portSubs := filepath.Join(t.root, "ports", t.portID, "subsystems")
 	if err := os.MkdirAll(portSubs, 0o755); err != nil {
 		return fmt.Errorf("mkdir port subsystems: %w", err)
 	}
@@ -255,7 +258,7 @@ func (t *Target) LinkSubsystemToPort(nqn string) error {
 	return nil
 }
 
-// TeardownVolume removes the subsystem for nqn from the shared port and
+// TeardownVolume removes the subsystem for nqn from its port and
 // deletes it. Idempotent and tolerant of a partially-created tree.
 func (t *Target) TeardownVolume(nqn string) error {
 	// 1. Unlink the subsystem from every port.

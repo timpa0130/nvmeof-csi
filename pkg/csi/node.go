@@ -10,7 +10,6 @@ import (
 	"syscall"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
-	"github.com/timpa0130/nvmeof-csi/pkg/ids"
 	"github.com/timpa0130/nvmeof-csi/pkg/node"
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc/codes"
@@ -51,9 +50,10 @@ func (s *nodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolu
 	if err != nil {
 		return nil, err
 	}
-	nqn := ids.NQN(volumeID)
+	scope := s.d.scope()
+	nqn := scope.NQN(volumeID)
 	nodeID := s.d.cfg.NodeID
-	if err := node.Connect(ctx, nqn, s.d.cfg.TargetAddr, s.d.cfg.Port, ids.HostNQN(nodeID), ids.HostID(nodeID)); err != nil {
+	if err := node.Connect(ctx, nqn, s.d.cfg.TargetAddr, s.d.cfg.Port, scope.HostNQN(nodeID), scope.HostID(nodeID)); err != nil {
 		return nil, status.Errorf(codes.Internal, "stage volume: %v", err)
 	}
 	ns, err := node.LookupNamespace(nqn)
@@ -111,7 +111,7 @@ func (s *nodeServer) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstage
 			}
 		}
 	}
-	nqn := ids.NQN(volumeID)
+	nqn := s.d.scope().NQN(volumeID)
 	if err := node.Disconnect(nqn); err != nil {
 		return nil, status.Errorf(codes.Internal, "unstage volume: %v", err)
 	}
@@ -140,7 +140,7 @@ func (s *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublish
 		}
 		return s.publishFilesystem(staging, target)
 	}
-	return s.publishBlock(req, ids.NQN(volumeID), target)
+	return s.publishBlock(req, s.d.scope().NQN(volumeID), target)
 }
 
 // publishFilesystem bind-mounts the staged filesystem onto the target

@@ -47,8 +47,9 @@ func (s *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 	}
 
 	volumeID := ids.VolumeID(namespace, name)
-	nqn := ids.NQN(volumeID)
-	dataset := ids.Dataset(s.d.cfg.Pool, namespace, name)
+	scope := s.d.scope()
+	nqn := scope.NQN(volumeID)
+	dataset := scope.Dataset(namespace, name)
 	if len(nqn) > ids.MaxNQN {
 		return nil, status.Errorf(codes.InvalidArgument, "derived NQN too long (%d > %d bytes); use a shorter volume name", len(nqn), ids.MaxNQN)
 	}
@@ -100,9 +101,8 @@ func (s *controllerServer) DeleteVolume(ctx context.Context, req *csi.DeleteVolu
 	if err != nil {
 		return nil, err
 	}
-	ns, name := ids.SplitVolumeID(volumeID)
-	nqn := ids.NQN(volumeID)
-	dataset := ids.Dataset(s.d.cfg.Pool, ns, name)
+	nqn := s.d.scope().NQN(volumeID)
+	dataset := s.d.scope().Dataset(ids.SplitVolumeID(volumeID))
 	if err := s.d.target.TeardownVolume(nqn); err != nil {
 		return nil, status.Errorf(codes.Internal, "delete volume: %v", err)
 	}
@@ -129,19 +129,19 @@ func (s *controllerServer) ControllerPublishVolume(ctx context.Context, req *csi
 	if err := validateCapabilities([]*csi.VolumeCapability{req.GetVolumeCapability()}); err != nil {
 		return nil, err
 	}
-	hostNQN := ids.HostNQN(nodeID)
+	scope := s.d.scope()
+	hostNQN := scope.HostNQN(nodeID)
 	if len(hostNQN) > ids.MaxNQN {
 		return nil, status.Errorf(codes.InvalidArgument, "derived host NQN too long (%d > %d bytes)", len(hostNQN), ids.MaxNQN)
 	}
-	ns, name := ids.SplitVolumeID(volumeID)
-	dataset := ids.Dataset(s.d.cfg.Pool, ns, name)
+	dataset := scope.Dataset(ids.SplitVolumeID(volumeID))
 	if !s.d.zfs.Exists(dataset) {
 		return nil, status.Errorf(codes.NotFound, "volume %s not found", volumeID)
 	}
 	if err := s.d.exportVolume(volumeID); err != nil {
 		return nil, status.Errorf(codes.Internal, "publish volume: %v", err)
 	}
-	if err := s.d.target.GrantHost(ids.NQN(volumeID), hostNQN); err != nil {
+	if err := s.d.target.GrantHost(scope.NQN(volumeID), hostNQN); err != nil {
 		if errors.Is(err, nvmet.ErrHeldByOtherHost) {
 			return nil, status.Errorf(codes.FailedPrecondition, "publish volume %s to %s: %v", volumeID, nodeID, err)
 		}
@@ -163,8 +163,8 @@ func (s *controllerServer) ControllerUnpublishVolume(ctx context.Context, req *c
 		return nil, err
 	}
 	nodeID := req.GetNodeId()
-	ns, name := ids.SplitVolumeID(volumeID)
-	dataset := ids.Dataset(s.d.cfg.Pool, ns, name)
+	scope := s.d.scope()
+	dataset := scope.Dataset(ids.SplitVolumeID(volumeID))
 	if s.d.zfs.Exists(dataset) {
 		holder, err := s.d.zfs.Holder(dataset)
 		if err != nil {
@@ -178,9 +178,9 @@ func (s *controllerServer) ControllerUnpublishVolume(ctx context.Context, req *c
 	}
 	var hostNQN string
 	if nodeID != "" {
-		hostNQN = ids.HostNQN(nodeID)
+		hostNQN = scope.HostNQN(nodeID)
 	}
-	if err := s.d.target.RevokeHost(ids.NQN(volumeID), hostNQN); err != nil {
+	if err := s.d.target.RevokeHost(scope.NQN(volumeID), hostNQN); err != nil {
 		return nil, status.Errorf(codes.Internal, "unpublish volume: %v", err)
 	}
 	return &csi.ControllerUnpublishVolumeResponse{}, nil
@@ -188,8 +188,7 @@ func (s *controllerServer) ControllerUnpublishVolume(ctx context.Context, req *c
 
 func (s *controllerServer) ValidateVolumeCapabilities(ctx context.Context, req *csi.ValidateVolumeCapabilitiesRequest) (*csi.ValidateVolumeCapabilitiesResponse, error) {
 	volumeID := req.GetVolumeId()
-	ns, name := ids.SplitVolumeID(volumeID)
-	if !s.d.zfs.Exists(ids.Dataset(s.d.cfg.Pool, ns, name)) {
+	if !s.d.zfs.Exists(s.d.scope().Dataset(ids.SplitVolumeID(volumeID))) {
 		return nil, status.Error(codes.NotFound, "volume not found")
 	}
 	if err := validateCapabilities(req.GetVolumeCapabilities()); err != nil {
@@ -209,7 +208,7 @@ func (s *controllerServer) ListVolumes(ctx context.Context, req *csi.ListVolumes
 	}
 	entries := make([]*csi.ListVolumesResponse_Entry, 0, len(datasets))
 	for _, dataset := range datasets {
-		volumeID, ok := ids.ParseDataset(s.d.cfg.Pool, dataset)
+		volumeID, ok := s.d.scope().ParseDataset(dataset)
 		if !ok {
 			continue // not ours
 		}
@@ -254,7 +253,7 @@ func (s *controllerServer) volumeInfo(volumeID, dataset string, size int64) *csi
 		VolumeId:      volumeID,
 		CapacityBytes: size,
 		VolumeContext: map[string]string{
-			"nqn":     ids.NQN(volumeID),
+			"nqn":     s.d.scope().NQN(volumeID),
 			"nsid":    "1",
 			"dataset": dataset,
 		},

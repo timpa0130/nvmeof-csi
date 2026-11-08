@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
+	"github.com/timpa0130/nvmeof-csi/pkg/zfs"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -68,5 +69,44 @@ func TestRunServesOverTCP(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("Run did not return after context cancel")
+	}
+}
+
+// TestNewDriverValidatesClusterAndPort covers the startup checks behind the
+// multi-cluster flags: a cluster ID that could collide with another scope's
+// names, and a configfs port number the kernel could not create.
+func TestNewDriverValidatesClusterAndPort(t *testing.T) {
+	if _, err := NewDriver(Config{Pool: "nvme", Cluster: "c1", NVMePort: "tcp"}); err == nil {
+		t.Fatal("non-numeric nvme port accepted")
+	}
+	if _, err := NewDriver(Config{Pool: "nvme", Cluster: "c1.host"}); err == nil {
+		t.Fatal("cluster ID that collides with the host root accepted")
+	}
+
+	d, err := NewDriver(Config{Pool: "nvme", Cluster: "c1", NVMePort: "2"})
+	if err != nil {
+		t.Fatalf("NewDriver: %v", err)
+	}
+	if d.cfg.NVMePort != "2" {
+		t.Fatalf("nvme port = %q", d.cfg.NVMePort)
+	}
+	z, ok := d.zfs.(*zfs.ZFS)
+	if !ok {
+		t.Fatalf("driver store is %T", d.zfs)
+	}
+	if z.Root != "nvme/c1" {
+		t.Fatalf("dataset root = %q, want nvme/c1", z.Root)
+	}
+
+	// Empty cluster keeps the single-cluster layout: the pool is the root.
+	legacy, err := NewDriver(Config{Pool: "nvme"})
+	if err != nil {
+		t.Fatalf("NewDriver (legacy): %v", err)
+	}
+	if legacy.cfg.NVMePort != DefaultNVMePort {
+		t.Fatalf("default nvme port = %q, want %q", legacy.cfg.NVMePort, DefaultNVMePort)
+	}
+	if lz := legacy.zfs.(*zfs.ZFS); lz.Root != "nvme" || lz.Pool != "nvme" {
+		t.Fatalf("legacy root = %q, pool = %q", lz.Root, lz.Pool)
 	}
 }
